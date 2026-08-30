@@ -396,7 +396,8 @@ def add_run_args(parser):
         help=(
             "Knowledge retrieval config name (banking_knowledge domain). "
             "Offline: no_knowledge, full_kb, golden_retrieval, bm25, bm25_grep, grep_only. "
-            "Requires OPENAI_API_KEY: openai_embeddings*, alltools. "
+            "Requires OPENAI_API_KEY: openai_embeddings*. "
+            "Requires DASHSCOPE_API_KEY and DASHSCOPE_BASE_URL: alltools. "
             "Requires OPENROUTER_API_KEY: qwen_embeddings*, alltools-qwen. "
             "Requires sandbox-runtime: terminal_use*, alltools, alltools-qwen. "
             "Default for banking_knowledge: alltools (BM25 + dense + shell)."

@@ -571,11 +571,13 @@ def _compute_and_cache_embeddings(
 ) -> np.ndarray:
     """Compute embeddings and cache them."""
     from tau2.knowledge.embedders import (
+        BailianEmbedder,
         OpenAIEmbedder,
         OpenRouterEmbedder,
     )
 
     EMBEDDER_REGISTRY = {
+        "bailian": BailianEmbedder,
         "openai": OpenAIEmbedder,
         "openrouter": OpenRouterEmbedder,
     }
@@ -621,8 +623,8 @@ def get_unique_embedder_configs_for_retrieval_configs(
         ),
         "openai_embeddings": ("openai", {"model": "text-embedding-3-large"}),
         "openai_embeddings_reranker": ("openai", {"model": "text-embedding-3-large"}),
-        "alltools": ("openai", {"model": "text-embedding-3-large"}),
-        "AllTools": ("openai", {"model": "text-embedding-3-large"}),
+        "alltools": ("bailian", {"model": "qwen3.7-text-embedding"}),
+        "AllTools": ("bailian", {"model": "qwen3.7-text-embedding"}),
         "alltools-qwen": ("openrouter", {"model": "qwen3-embedding-8b"}),
     }
 

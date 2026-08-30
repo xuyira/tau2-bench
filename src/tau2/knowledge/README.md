@@ -18,7 +18,7 @@ If `--retrieval-config` is omitted for `banking_knowledge`, the default is **`al
 
 Requirements: **sandbox-runtime** for `shell`, and an embedding API for dense search:
 
-- **`alltools`**: uses OpenAI embeddings — set **`OPENAI_API_KEY`**. Model: **`text-embedding-3-large`**.
+- **`alltools`**: uses Alibaba Cloud Model Studio (Bailian) — set **`DASHSCOPE_API_KEY`** and **`DASHSCOPE_BASE_URL`**. Model: **`qwen3.7-text-embedding`**.
 - **`alltools-qwen`**: uses OpenRouter/Qwen embeddings — set **`OPENROUTER_API_KEY`**. Model: **`qwen3-embedding-8b`**.
 
 ## Retrieval Configs
@@ -34,7 +34,7 @@ Requirements: **sandbox-runtime** for `shell`, and an embedding API for dense se
 | `qwen_embeddings` | `KB_search` | `OPENROUTER_API_KEY` |
 | `terminal_use` | `shell` | `sandbox-runtime` (see below) |
 | `terminal_use_write` | `shell` | `sandbox-runtime` (see below) |
-| `alltools` | `KB_search_bm25`, `KB_search_dense`, `shell` | BM25 offline + OpenAI dense embeddings + sandbox-runtime |
+| `alltools` | `KB_search_bm25`, `KB_search_dense`, `shell` | BM25 offline + Bailian dense embeddings + sandbox-runtime |
 | `alltools-qwen` | `KB_search_bm25`, `KB_search_dense`, `shell` | BM25 offline + Qwen dense embeddings + sandbox-runtime |
 
 The `bm25`, `openai_embeddings`, and `qwen_embeddings` configs can also be combined with:

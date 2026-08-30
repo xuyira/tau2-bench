@@ -1100,6 +1100,14 @@ class TestRetrievalVariantRegistry:
         variant = resolve_variant("AllTools")
         assert variant.name == "alltools"
 
+    def test_resolve_variant_alltools_uses_bailian_dense(self):
+        from tau2.domains.banking_knowledge.retrieval import resolve_variant
+
+        variant = resolve_variant("alltools")
+        assert variant.kb_search_dense is not None
+        assert variant.kb_search_dense.embedder_type == "bailian"
+        assert variant.kb_search_dense.embedder_model == "qwen3.7-text-embedding"
+
     def test_resolve_variant_alltools_qwen(self):
         from tau2.domains.banking_knowledge.retrieval import resolve_variant
 
@@ -1126,13 +1134,13 @@ class TestRetrievalVariantRegistry:
 
 
 class TestAllToolsEmbedderWarmupMapping:
-    def test_unique_embedder_config_alltools_openai_defaults(self):
+    def test_unique_embedder_config_alltools_bailian_defaults(self):
         from tau2.knowledge.embeddings_cache import (
             get_unique_embedder_configs_for_retrieval_configs,
         )
 
         configs = get_unique_embedder_configs_for_retrieval_configs(["alltools"])
-        assert configs == [("openai", {"model": "text-embedding-3-large"})]
+        assert configs == [("bailian", {"model": "qwen3.7-text-embedding"})]
 
     def test_unique_embedder_config_alltools_qwen(self):
         from tau2.knowledge.embeddings_cache import (
@@ -1151,7 +1159,7 @@ class TestAllToolsEmbedderWarmupMapping:
             ["alltools", "AllTools", "alltools-qwen"],
         )
         assert configs == [
-            ("openai", {"model": "text-embedding-3-large"}),
+            ("bailian", {"model": "qwen3.7-text-embedding"}),
             ("openrouter", {"model": "qwen3-embedding-8b"}),
         ]
 
@@ -1161,7 +1169,7 @@ class TestAllToolsEmbedderWarmupMapping:
         )
 
         configs = get_unique_embedder_configs_for_retrieval_configs(["AllTools"])
-        assert configs == [("openai", {"model": "text-embedding-3-large"})]
+        assert configs == [("bailian", {"model": "qwen3.7-text-embedding"})]
 
 
 class TestBankingKnowledgeRunConfigDefaults:

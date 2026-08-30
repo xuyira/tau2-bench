@@ -60,6 +60,7 @@ DEFAULT_RETRIEVAL_VARIANT = "alltools"
 
 DEFAULT_DENSE_EMBEDDING_MODEL_OPENAI = "text-embedding-3-large"
 DEFAULT_DENSE_EMBEDDING_MODEL_OPENROUTER = "qwen3-embedding-8b"
+DEFAULT_DENSE_EMBEDDING_MODEL_BAILIAN = "qwen3.7-text-embedding"
 
 
 def format_all_tools_dense_instructions(variant: "RetrievalVariant") -> str:
@@ -69,7 +70,10 @@ def format_all_tools_dense_instructions(variant: "RetrievalVariant") -> str:
 
     embedder_type = variant.kb_search_dense.embedder_type
     model = variant.kb_search_dense.embedder_model
-    if embedder_type == "openai":
+    if embedder_type == "bailian":
+        provider = "Alibaba Cloud Model Studio (Bailian)"
+        model = model or DEFAULT_DENSE_EMBEDDING_MODEL_BAILIAN
+    elif embedder_type == "openai":
         provider = "OpenAI API"
         model = model or DEFAULT_DENSE_EMBEDDING_MODEL_OPENAI
     elif embedder_type == "openrouter":
@@ -594,8 +598,8 @@ RETRIEVAL_VARIANTS: Dict[str, RetrievalVariant] = {
     ),
     "alltools": all_tools_variant(
         "alltools",
-        embedder_type="openai",
-        embedder_model=DEFAULT_DENSE_EMBEDDING_MODEL_OPENAI,
+        embedder_type="bailian",
+        embedder_model=DEFAULT_DENSE_EMBEDDING_MODEL_BAILIAN,
     ),
     "alltools-qwen": all_tools_variant(
         "alltools-qwen",

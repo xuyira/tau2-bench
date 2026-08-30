@@ -4,7 +4,7 @@ Exercises the full path: variant name -> resolve_variant -> build_tools ->
 tool invocation -> output, with a hard-coded 5-doc corpus.
 
 BM25/grep variants run offline.  Embedding variants hit real APIs and are
-gated by OPENAI_API_KEY / OPENROUTER_API_KEY env vars.
+gated by the corresponding provider API environment variables.
 """
 
 from __future__ import annotations
@@ -27,13 +27,19 @@ requires_openrouter = pytest.mark.skipif(
     not os.environ.get("OPENROUTER_API_KEY"),
     reason="OPENROUTER_API_KEY not set",
 )
+requires_bailian = pytest.mark.skipif(
+    not os.environ.get("DASHSCOPE_API_KEY") or not os.environ.get("DASHSCOPE_BASE_URL"),
+    reason="DASHSCOPE_API_KEY or DASHSCOPE_BASE_URL not set",
+)
 requires_sandbox_runtime = pytest.mark.skipif(
     shutil.which("srt") is None,
     reason="sandbox-runtime (srt) is not installed",
 )
 requires_all_tools_deps = pytest.mark.skipif(
-    not os.environ.get("OPENAI_API_KEY") or shutil.which("srt") is None,
-    reason="alltools requires OPENAI_API_KEY and sandbox-runtime (srt)",
+    not os.environ.get("DASHSCOPE_API_KEY")
+    or not os.environ.get("DASHSCOPE_BASE_URL")
+    or shutil.which("srt") is None,
+    reason="alltools requires DASHSCOPE API config and sandbox-runtime (srt)",
 )
 DOCUMENTS: List[Dict[str, Any]] = [
     {
@@ -136,6 +142,8 @@ def _api_mark(gate):
         return requires_openrouter
     if gate == "openai":
         return requires_openai
+    if gate == "bailian":
+        return requires_bailian
     if gate == "sandbox_runtime":
         return requires_sandbox_runtime
     if gate == "all_tools":

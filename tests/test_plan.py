@@ -14,6 +14,7 @@ from tau2.agent.plan import (
 def make_plan(**overrides):
     data = {
         "goal": "Resolve the customer's request",
+        "task_mode": TaskMode.WORKFLOW,
         "capabilities": {TaskMode.WORKFLOW},
         "success_conditions": [
             SuccessCondition(id="resolved", description="The request is resolved")
@@ -43,8 +44,9 @@ def test_plan_round_trip():
     assert PlanState.model_validate_json(plan.model_dump_json()) == plan
 
 
-def test_task_mode_removed_from_schema():
-    assert "task_mode" not in PlanState.model_fields
+def test_task_mode_is_optional_diagnostic_metadata():
+    plan = make_plan(task_mode=None)
+    assert plan.task_mode is None
 
 
 def test_assistant_completion_evidence_cannot_include_tool_patterns():
@@ -58,19 +60,6 @@ def test_assistant_completion_evidence_cannot_include_tool_patterns():
                 "tool_names": ["some_tool"],
             },
         )
-
-
-def test_non_assistant_evidence_ignores_assistant_output():
-    step = PlanStep(
-        id="ask",
-        kind="ask_user",
-        description="Ask",
-        completion_evidence={
-            "event": "user_message",
-            "assistant_output": "text",
-        },
-    )
-    assert step.completion_evidence.assistant_output == "any"
 
 
 def test_plan_rejects_duplicate_step_ids():
@@ -112,12 +101,14 @@ def test_plan_rejects_cycles():
 def test_selection_requires_structured_selection_details():
     with pytest.raises(ValidationError, match="selection details are required"):
         make_plan(
+            task_mode=TaskMode.SELECTION,
             capabilities={TaskMode.SELECTION},
         )
 
 
 def test_selection_can_also_require_workflow():
     plan = make_plan(
+        task_mode=TaskMode.SELECTION,
         capabilities={TaskMode.SELECTION, TaskMode.WORKFLOW},
         selection={
             "candidate_scope": "checking account referral programs",
@@ -163,6 +154,7 @@ def test_selection_can_also_require_workflow():
         current_step_id="verify",
     )
 
+    assert plan.task_mode == TaskMode.SELECTION
     assert plan.capabilities == {TaskMode.SELECTION, TaskMode.WORKFLOW}
     assert plan.selection is not None
     assert plan.selection.objective == "maximize"
@@ -176,6 +168,7 @@ def test_selection_can_also_require_workflow():
 
 def test_legacy_selection_retrieval_does_not_duplicate_top_level_request():
     plan = make_plan(
+        task_mode=TaskMode.SELECTION,
         capabilities={TaskMode.SELECTION},
         selection={
             "candidate_scope": "checking accounts",
@@ -226,6 +219,7 @@ def test_completed_step_cannot_be_reopened():
 
 def test_legacy_selection_relevance_promotes_each_query():
     plan = make_plan(
+        task_mode=TaskMode.SELECTION,
         capabilities={TaskMode.SELECTION},
         selection={
             "candidate_scope": "accounts",
@@ -250,6 +244,7 @@ def test_legacy_selection_relevance_promotes_each_query():
 
 def test_top_level_retrieval_requests_support_selection_and_workflow_evidence():
     plan = make_plan(
+        task_mode=TaskMode.SELECTION,
         capabilities={TaskMode.SELECTION, TaskMode.WORKFLOW},
         selection={
             "candidate_scope": "checking and savings accounts",
@@ -297,17 +292,15 @@ def test_top_level_retrieval_requests_support_selection_and_workflow_evidence():
     ]
 
 
-def test_relevance_retrieval_discards_product_scope():
-    request = RetrievalRequest(
-        id="scoped_relevance",
-        purpose="Find a workflow",
-        query="referral workflow",
-        mode="relevance",
-        product_category="checking_account",
-        target_product_names=["Blue Account"],
-    )
-    assert request.product_category is None
-    assert request.target_product_names == []
+def test_relevance_retrieval_rejects_product_scope():
+    with pytest.raises(ValidationError, match="cannot use product scope"):
+        RetrievalRequest(
+            id="scoped_relevance",
+            purpose="Find a workflow",
+            query="referral workflow",
+            mode="relevance",
+            product_category="checking_account",
+        )
 
 
 def test_plan_rejects_unknown_retrieval_request_reference():
@@ -372,7 +365,7 @@ def test_request_unknown_dependency_still_fails():
 
 def test_mixed_is_not_a_capability():
     with pytest.raises(ValidationError, match="not a capability"):
-        make_plan(capabilities={TaskMode.MIXED})
+        make_plan(task_mode=TaskMode.MIXED, capabilities={TaskMode.MIXED})
 
 
 @pytest.mark.parametrize(

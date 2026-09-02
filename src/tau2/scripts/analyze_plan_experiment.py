@@ -39,7 +39,7 @@ class SimulationSummary:
     write_actions: int
     last_completed_action: str | None
     shadow_plan_status: str | None
-    shadow_plan_capabilities: list[str]
+    shadow_plan_task_mode: str | None
 
 
 def _load_results(path: Path) -> Results:
@@ -114,9 +114,7 @@ def summarize_simulation(source: str, simulation: SimulationRun) -> SimulationSu
         write_actions=sum(name in write_names for name, _ in effective_calls),
         last_completed_action=_last_tool_result_name(simulation),
         shadow_plan_status=diagnostics.get("status"),
-        shadow_plan_capabilities=sorted(
-            (diagnostics.get("plan") or {}).get("capabilities") or []
-        ),
+        shadow_plan_task_mode=(diagnostics.get("plan") or {}).get("task_mode"),
     )
 
 
@@ -154,7 +152,7 @@ def main() -> None:
         "retrieval_calls",
         "write_actions",
         "last_completed_action",
-        "shadow_plan_capabilities",
+        "shadow_plan_task_mode",
     ]
     print("\t".join(columns))
     for row in rows:

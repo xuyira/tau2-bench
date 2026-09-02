@@ -28,6 +28,7 @@ KB_SEARCH_TOOL = as_tool(KB_search)
 def valid_plan_json() -> str:
     return PlanState(
         goal="Help the customer",
+        task_mode="workflow",
         capabilities={"workflow"},
         success_conditions=[
             {"id": "resolved", "description": "The request is resolved"}
@@ -350,6 +351,7 @@ def test_selection_executor_schema_allows_all_products(get_environment):
     )
     plan = PlanState(
         goal="Choose the best account",
+        task_mode="selection",
         capabilities={"selection"},
         selection={
             "candidate_scope": "checking accounts",
@@ -388,6 +390,7 @@ def test_top_level_selection_request_controls_coverage_gate(get_environment):
     state = agent.get_init_state()
     state.plan = PlanState(
         goal="Compare every checking account",
+        task_mode="selection",
         capabilities={"selection"},
         selection={
             "candidate_scope": "checking accounts",
@@ -430,6 +433,7 @@ def test_kb_search_updates_top_level_product_coverage_progress(get_environment):
     state = agent.get_init_state()
     state.plan = PlanState(
         goal="Compare checking accounts",
+        task_mode="selection",
         capabilities={"selection"},
         selection={
             "candidate_scope": "checking accounts",
@@ -510,6 +514,7 @@ def test_kb_search_updates_matching_relevance_request(get_environment):
     state = agent.get_init_state()
     state.plan = PlanState(
         goal="Resolve a cash back issue",
+        task_mode="investigation",
         capabilities={"investigation"},
         retrieval_requests=[
             {
@@ -556,6 +561,7 @@ def test_retrieval_step_waits_for_every_linked_relevance_request(get_environment
     state = agent.get_init_state()
     state.plan = PlanState(
         goal="Resolve a cash back issue",
+        task_mode="investigation",
         capabilities={"investigation"},
         retrieval_requests=[
             {"id": "rules", "purpose": "Find rules", "query": "reward rules"},
@@ -611,6 +617,7 @@ def test_controller_executes_ready_relevance_requests(get_environment):
     state = agent.get_init_state()
     state.plan = PlanState(
         goal="Investigate rewards",
+        task_mode="investigation",
         capabilities={"investigation"},
         retrieval_requests=[
             {"id": "rules", "purpose": "Find rules", "query": "reward rules"},
@@ -683,6 +690,7 @@ def test_controller_continues_all_products_with_missing_names(get_environment):
     state = agent.get_init_state()
     state.plan = PlanState(
         goal="Compare accounts",
+        task_mode="selection",
         capabilities={"selection"},
         selection={
             "candidate_scope": "accounts",
@@ -760,6 +768,7 @@ def test_controller_stops_all_products_after_one_stalled_rewrite(get_environment
     state = agent.get_init_state()
     state.plan = PlanState(
         goal="Compare accounts",
+        task_mode="selection",
         capabilities={"selection"},
         selection={
             "candidate_scope": "accounts",
@@ -816,6 +825,7 @@ def test_controller_retrieval_failure_is_recorded_without_tool_history(
     state = agent.get_init_state()
     state.plan = PlanState(
         goal="Find a workflow",
+        task_mode="workflow",
         capabilities={"workflow"},
         retrieval_requests=[
             {"id": "workflow", "purpose": "Find workflow", "query": "workflow"}
@@ -876,6 +886,7 @@ def test_plan_state_advances_only_after_selection_coverage_and_user_state(
     state = agent.get_init_state()
     plan = PlanState(
         goal="Recommend an eligible account",
+        task_mode="selection",
         capabilities={"selection", "workflow"},
         selection={
             "candidate_scope": "checking accounts",
@@ -1260,6 +1271,7 @@ def test_selection_plan_keeps_full_executor_tools(get_environment):
     state = agent.get_init_state()
     state.plan = PlanState(
         goal="Recommend after checking eligibility",
+        task_mode="selection",
         capabilities={"selection", "workflow"},
         selection={
             "candidate_scope": "accounts",

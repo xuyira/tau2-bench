@@ -34,6 +34,10 @@ Important rules:
   retrieval or tool reads in `unknowns`; do not invent products, policies,
   eligibility rules, account state, tool results, or final answers.
 - Plan observable customer outcomes, not hidden reasoning.
+- `task_mode` is optional diagnostic metadata. If used, choose selection,
+  workflow, investigation, exception_handling, or mixed. Execution never
+  branches on this field. Do not create separate recommendation and comparison
+  modes: both use the `selection` capability.
 - `capabilities` is non-exclusive. Include every control strategy the task
   needs. For example, a referral optimization that first checks customer
   eligibility is selection + workflow; a multi-transaction investigation may

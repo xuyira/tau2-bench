@@ -85,8 +85,9 @@ class RetrievalRequest(BaseModel):
             if not self.product_category:
                 raise ValueError("all_products retrieval requires product_category")
         elif self.product_category or self.target_product_names:
-            self.product_category = None
-            self.target_product_names = []
+            raise ValueError(
+                "relevance retrieval searches the full KB and cannot use product scope"
+            )
         if self.target_product_names and not self.product_category:
             raise ValueError("target_product_names requires product_category")
         return self
@@ -142,8 +143,10 @@ class CompletionEvidence(BaseModel):
             raise ValueError(
                 "non-tool completion evidence cannot use tool call patterns"
             )
-        if self.event != "assistant_message":
-            self.assistant_output = "any"
+        if self.event != "assistant_message" and self.assistant_output != "any":
+            raise ValueError(
+                "assistant_output applies only to assistant_message evidence"
+            )
         return self
 
 
@@ -196,6 +199,7 @@ class PlanState(BaseModel):
 
     version: int = Field(default=1, ge=1)
     goal: str = Field(min_length=1)
+    task_mode: Optional[TaskMode] = None
     capabilities: set[TaskMode] = Field(min_length=1)
     selection: Optional[SelectionPlan] = None
     retrieval_requests: list[RetrievalRequest] = Field(default_factory=list)
@@ -330,6 +334,12 @@ class PlanState(BaseModel):
         """Reject ambiguous references and cyclic dependency graphs."""
         if TaskMode.MIXED in self.capabilities:
             raise ValueError("mixed is a primary-mode fallback, not a capability")
+        if (
+            self.task_mode is not None
+            and self.task_mode != TaskMode.MIXED
+            and self.task_mode not in self.capabilities
+        ):
+            raise ValueError("task_mode must be included in capabilities")
         if TaskMode.SELECTION in self.capabilities and self.selection is None:
             raise ValueError("selection details are required for selection tasks")
         if TaskMode.SELECTION not in self.capabilities and self.selection is not None:

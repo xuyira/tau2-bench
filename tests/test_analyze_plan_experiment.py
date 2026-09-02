@@ -24,7 +24,7 @@ def test_summarize_simulation_counts_calls_and_shadow_plan():
         info={
             "shadow_plan": {
                 "status": "success",
-                "plan": {"capabilities": ["selection", "workflow"]},
+                "plan": {"task_mode": "recommendation"},
             }
         },
     )
@@ -35,4 +35,4 @@ def test_summarize_simulation_counts_calls_and_shadow_plan():
     assert summary.retrieval_calls == 1
     assert summary.last_completed_action == "KB_search"
     assert summary.shadow_plan_status == "success"
-    assert summary.shadow_plan_capabilities == ["selection", "workflow"]
+    assert summary.shadow_plan_task_mode == "recommendation"

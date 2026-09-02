@@ -759,7 +759,7 @@ class ShadowPlanningLLMAgent(LLMAgent[ShadowPlanningAgentState]):
     @staticmethod
     def _refresh_current_step(plan: PlanState) -> None:
         completed = {step.id for step in plan.steps if step.status == "completed"}
-        terminal = {"completed", "failed", "skipped"}
+        terminal = {"completed", "failed", "blocked", "skipped"}
         ready_steps = [
             step
             for step in plan.steps
@@ -771,6 +771,22 @@ class ShadowPlanningLLMAgent(LLMAgent[ShadowPlanningAgentState]):
         for step in ready_steps:
             step.status = "ready"
         plan.current_step_id = ready_steps[0].id if ready_steps else None
+
+    @staticmethod
+    def _current_ready_step(plan: PlanState):
+        """Return the first executable step in plan order."""
+        ready = plan.ready_steps()
+        return ready[0] if ready else None
+
+    @staticmethod
+    def _step_tool_names(step) -> set[str]:
+        """Extract explicit tool names declared by a step's evidence."""
+        evidence = step.completion_evidence
+        if evidence is None:
+            return set()
+        return set(evidence.tool_names) | {
+            pattern.tool_name for pattern in evidence.tool_calls
+        }
 
     def _sync_plan_diagnostics(self, state: ShadowPlanningAgentState) -> None:
         if self._shadow_plan_diagnostics is not None and state.plan is not None:
@@ -786,10 +802,31 @@ class ShadowPlanningLLMAgent(LLMAgent[ShadowPlanningAgentState]):
             }
 
     def _get_executor_tools(self, state: ShadowPlanningAgentState) -> list[Tool]:
-        """Expose only tools that can advance the current plan control state."""
+        """Expose tools relevant to the current ready step when declared.
+
+        A plan step with explicit tool evidence is a useful control boundary,
+        but older plans often omit evidence. In that case we deliberately keep
+        the full tool set so a sparse plan does not become an artificial hard
+        failure.
+        """
         if state.plan is None:
             return self.tools
         by_name = {tool.name: tool for tool in self.tools}
+
+        current_step = self._current_ready_step(state.plan)
+        if current_step is not None:
+            declared = self._step_tool_names(current_step)
+            retrieval_pending = current_step.kind == "retrieve" and any(
+                request.status not in {"completed", "failed", "incomplete"}
+                for request in state.plan.retrieval_requests
+                if request.id in current_step.retrieval_request_ids
+            )
+            if current_step.kind == "retrieve" and retrieval_pending:
+                declared.add("KB_search")
+            if declared and (current_step.kind != "retrieve" or retrieval_pending):
+                selected = [tool for name, tool in by_name.items() if name in declared]
+                if selected:
+                    return selected
 
         if (
             state.plan.selection is not None
@@ -827,8 +864,10 @@ class ShadowPlanningLLMAgent(LLMAgent[ShadowPlanningAgentState]):
         ready = [
             step.model_dump(mode="json")
             for step in plan.steps
-            if step.status == "ready"
+            if step.status == "ready" and step.id == plan.current_step_id
         ]
+        if not ready:
+            ready = [step.model_dump(mode="json") for step in plan.ready_steps()[:1]]
         user_state_gate = (
             plan.selection is not None and plan.selection.requires_user_state
         )

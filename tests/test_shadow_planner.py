@@ -75,6 +75,45 @@ def test_retrieval_plan_round_trip():
     assert SelectionPlan.model_validate_json(selection.model_dump_json()) == selection
 
 
+def test_current_ready_step_uses_dependency_order():
+    plan = PlanState(
+        goal="Resolve request",
+        capabilities={"workflow"},
+        success_conditions=[{"id": "done", "description": "Done"}],
+        steps=[
+            {"id": "first", "kind": "read", "description": "Read", "status": "ready"},
+            {
+                "id": "second",
+                "kind": "write",
+                "description": "Write",
+                "depends_on": ["first"],
+            },
+        ],
+    )
+    assert ShadowPlanningLLMAgent._current_ready_step(plan).id == "first"
+    plan.transition_step("first", "completed")
+    assert ShadowPlanningLLMAgent._current_ready_step(plan).id == "second"
+
+
+def test_step_tool_names_are_explicit_only():
+    plan = PlanState(
+        goal="Resolve request",
+        capabilities={"workflow"},
+        success_conditions=[{"id": "done", "description": "Done"}],
+        steps=[
+            {
+                "id": "read",
+                "kind": "read",
+                "description": "Read",
+                "completion_evidence": {"tool_names": ["get_referrals_by_user"]},
+            }
+        ],
+    )
+    assert ShadowPlanningLLMAgent._step_tool_names(plan.steps[0]) == {
+        "get_referrals_by_user"
+    }
+
+
 def make_agent(get_environment):
     environment = get_environment()
     return ShadowPlanningLLMAgent(

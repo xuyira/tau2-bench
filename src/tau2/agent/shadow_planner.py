@@ -11,11 +11,12 @@ from pydantic import Field, create_model
 from tau2.agent.base_agent import ValidAgentInputMessage
 from tau2.agent.llm_agent import LLMAgent, LLMAgentState
 from tau2.agent.observations import Observation
-from tau2.agent.plan import PlanState
+from tau2.agent.plan import PlanState, RetrievalRequest
 from tau2.data_model.message import (
     AssistantMessage,
     MultiToolMessage,
     SystemMessage,
+    ToolCall,
     ToolMessage,
     UserMessage,
 )
@@ -116,6 +117,39 @@ retrieval when needed.
 </bootstrap_evidence>
 """.strip()
 
+REPLAN_PROMPT = """
+You are revising an existing customer-service execution plan after an observed
+execution problem. Return one complete PlanState through submit_shadow_plan.
+Keep the customer's original goal and preserve every already completed step and
+completed retrieval request. Only revise, replace, or append pending, ready,
+in-progress, blocked, or failed work. Do not repeat completed verification,
+customer-state reads, writes, or retrieval coverage. Use the same evidence and
+tool rules as the initial planner, and make the first newly executable step
+ready. This is an incremental recovery plan, not a new conversation.
+
+<original_plan>
+{plan}
+</original_plan>
+<observations>
+{observations}
+</observations>
+<retrieval_evidence>
+{retrieval_evidence}
+</retrieval_evidence>
+<trigger>
+{trigger}
+</trigger>
+<customer_request>
+{request}
+</customer_request>
+<policy>
+{policy}
+</policy>
+<tool_catalog>
+{tool_catalog}
+</tool_catalog>
+""".strip()
+
 METADATA_CAPABILITIES = {
     "capabilities": {
         "supports_product_names": True,
@@ -138,6 +172,8 @@ class ShadowPlanningAgentState(LLMAgentState):
     required_customer_state_tools: list[str] = Field(default_factory=list)
     customer_state_tools_read: list[str] = Field(default_factory=list)
     observations: list[Observation] = Field(default_factory=list)
+    replan_count: int = 0
+    replan_history: list[dict[str, Any]] = Field(default_factory=list)
     bootstrap_evidence: Optional[str] = None
     bootstrap_retrieval_error: Optional[str] = None
     retrieval_evidence: dict[str, list[str]] = Field(default_factory=dict)
@@ -209,6 +245,7 @@ class ShadowPlanningLLMAgent(LLMAgent[ShadowPlanningAgentState]):
         self._update_plan_from_observation(
             message, state, allow_user_step=plan_already_existed
         )
+        self._maybe_replan(message, state)
         self._execute_ready_retrieval_requests(state)
         self._attach_execution_context(state)
         self._configure_executor_retrieval_schema(state.plan)
@@ -318,7 +355,74 @@ class ShadowPlanningLLMAgent(LLMAgent[ShadowPlanningAgentState]):
         plan_data = diagnostics.get("plan")
         if diagnostics.get("status") == "success" and plan_data:
             state.plan = PlanState.model_validate(plan_data)
+            self._ensure_exhaustive_selection_retrieval(state.plan)
             state.required_customer_state_tools = self._required_state_tools(state.plan)
+
+    @staticmethod
+    def _ensure_exhaustive_selection_retrieval(plan: PlanState) -> None:
+        """Repair a selection plan that forgot its all-products request.
+
+        This is a structural execution safeguard, not a semantic validator. A
+        planner may keep relevance requests for policy context, but an
+        exhaustive product comparison must also have one controller-owned
+        coverage request so candidates such as Blue Account cannot disappear
+        from a top-k relevance sample.
+        """
+        selection = plan.selection
+        if selection is None or not selection.requires_exhaustive_comparison:
+            return
+        if any(request.mode == "all_products" for request in plan.retrieval_requests):
+            return
+        text = " ".join(
+            [plan.goal, selection.candidate_scope, selection.objective_expression]
+            + [request.query for request in plan.retrieval_requests]
+        ).lower()
+        category = next(
+            (
+                candidate
+                for keyword, candidate in (
+                    ("checking", "checking_account"),
+                    ("savings", "savings_account"),
+                    ("credit card", "credit_card"),
+                    ("credit", "credit_card"),
+                )
+                if keyword in text
+            ),
+            None,
+        )
+        if category is None:
+            return
+        base = next(
+            (
+                request
+                for request in plan.retrieval_requests
+                if request.mode == "relevance"
+            ),
+            None,
+        )
+        if base is None:
+            return
+        request_id = f"{base.id}_exhaustive_{category}"
+        existing_ids = {request.id for request in plan.retrieval_requests}
+        suffix = 2
+        while request_id in existing_ids:
+            request_id = f"{base.id}_exhaustive_{category}_{suffix}"
+            suffix += 1
+        coverage = RetrievalRequest(
+            id=request_id,
+            purpose=f"Exhaustively cover all products in {category} for comparison",
+            query=base.query,
+            mode="all_products",
+            resource_type="product",
+            product_category=category,
+            document_intents=list(base.document_intents),
+        )
+        plan.retrieval_requests.append(coverage)
+        retrieve_step = next(
+            (step for step in plan.steps if step.kind == "retrieve"), None
+        )
+        if retrieve_step is not None:
+            retrieve_step.retrieval_request_ids.append(request_id)
 
     @staticmethod
     def _required_state_tools(plan: PlanState) -> list[str]:
@@ -370,10 +474,18 @@ class ShadowPlanningLLMAgent(LLMAgent[ShadowPlanningAgentState]):
         retrieval_observed = False
         observed_calls = []
         for tool_message in tool_messages:
+            event_id = (
+                f"result:{tool_message.id}"
+                if tool_message.id
+                else f"tool-result:{len(state.observations)}"
+            )
+            if any(
+                observation.event_id == event_id for observation in state.observations
+            ):
+                continue
             state.observations.append(
                 Observation(
-                    event_id=tool_message.id
-                    or f"tool-result:{len(state.observations)}",
+                    event_id=event_id,
                     event_type="tool_result",
                     result=tool_message.content,
                     success=not tool_message.error,
@@ -385,9 +497,24 @@ class ShadowPlanningLLMAgent(LLMAgent[ShadowPlanningAgentState]):
             if call is None:
                 continue
             state.completed_tool_calls.append(call.name)
-            observed_calls.append(call)
             state.observations[-1].tool_name = call.name
             state.observations[-1].arguments = call.arguments
+            # Evidence matching uses the normalized inner name for discoverable
+            # wrappers while retaining the original call in the conversation log.
+            normalized_name = call.arguments.get(
+                "agent_tool_name"
+            ) or call.arguments.get("discoverable_tool_name")
+            if normalized_name:
+                observed_calls.append(
+                    ToolCall(
+                        id=call.id,
+                        name=normalized_name,
+                        arguments=call.arguments.get("arguments", call.arguments),
+                        requestor=call.requestor,
+                    )
+                )
+            else:
+                observed_calls.append(call)
             if call.name == "KB_search":
                 retrieval_observed = True
                 self._record_retrieval_observation(
@@ -855,60 +982,128 @@ class ShadowPlanningLLMAgent(LLMAgent[ShadowPlanningAgentState]):
                     observation.model_dump(mode="json")
                     for observation in state.observations
                 ],
+                "replan_count": state.replan_count,
+                "replan_history": state.replan_history,
             }
 
-    def _get_executor_tools(self, state: ShadowPlanningAgentState) -> list[Tool]:
-        """Expose tools relevant to the current ready step when declared.
-
-        A plan step with explicit tool evidence is a useful control boundary,
-        but older plans often omit evidence. In that case we deliberately keep
-        the full tool set so a sparse plan does not become an artificial hard
-        failure.
-        """
-        if state.plan is None:
-            return self.tools
-        by_name = {tool.name: tool for tool in self.tools}
-
-        current_step = self._current_ready_step(state.plan)
-        if current_step is not None:
-            declared = self._step_tool_names(current_step)
-            retrieval_pending = current_step.kind == "retrieve" and any(
-                request.status not in {"completed", "failed", "incomplete"}
-                for request in state.plan.retrieval_requests
-                if request.id in current_step.retrieval_request_ids
+    def _maybe_replan(
+        self, message: ValidAgentInputMessage, state: ShadowPlanningAgentState
+    ) -> None:
+        """Run at most one fail-open incremental replan after an execution stall."""
+        plan = state.plan
+        if plan is None or state.replan_count >= 1:
+            return
+        trigger: Optional[str] = None
+        if isinstance(message, MultiToolMessage):
+            if any(tool_message.error for tool_message in message.tool_messages):
+                trigger = "tool_call_failed"
+        elif isinstance(message, ToolMessage) and message.error:
+            trigger = "tool_call_failed"
+        if trigger is None:
+            terminal = {"completed", "failed", "blocked", "skipped"}
+            has_waiting = any(
+                step.status in {"waiting_user", "in_progress"} for step in plan.steps
             )
-            if current_step.kind == "retrieve" and retrieval_pending:
-                declared.add("KB_search")
-            if declared and (current_step.kind != "retrieve" or retrieval_pending):
-                selected = [tool for name, tool in by_name.items() if name in declared]
-                if selected:
-                    return selected
+            has_pending = any(step.status not in terminal for step in plan.steps)
+            if has_pending and not has_waiting and not plan.ready_steps():
+                trigger = "no_ready_step_but_goal_incomplete"
+        if trigger is not None:
+            self._run_replan(message, state, trigger)
 
-        if (
-            state.plan.selection is not None
-            and state.plan.selection.requires_user_state
-        ):
-            if not self._retrieval_complete(state):
-                allowed = {"KB_search"}
-            elif not state.identity_verified:
-                allowed = {
-                    "get_current_time",
-                    "get_user_information_by_id",
-                    "get_user_information_by_name",
-                    "get_user_information_by_email",
-                    "log_verification",
-                }
-            elif not state.customer_state_read:
-                allowed = set(state.required_customer_state_tools)
+    def _run_replan(
+        self,
+        message: ValidAgentInputMessage,
+        state: ShadowPlanningAgentState,
+        trigger: str,
+    ) -> None:
+        """Ask the planner for recovery work and merge it fail-open."""
+        old_plan = state.plan
+        if old_plan is None:
+            return
+        request_text = message.content if isinstance(message, UserMessage) else ""
+        prompt = REPLAN_PROMPT.format(
+            plan=json.dumps(
+                old_plan.model_dump(mode="json"), indent=2, ensure_ascii=True
+            ),
+            observations=json.dumps(
+                [item.model_dump(mode="json") for item in state.observations],
+                indent=2,
+                ensure_ascii=True,
+            ),
+            retrieval_evidence=json.dumps(state.retrieval_evidence, ensure_ascii=True),
+            trigger=trigger,
+            request=request_text,
+            policy=self.domain_policy,
+            tool_catalog=json.dumps(_tool_catalog(self.tools), indent=2),
+        )
+        history: dict[str, Any] = {"trigger": trigger, "status": "error"}
+        try:
+            response = generate(
+                model=self.llm,
+                messages=[SystemMessage(role="system", content=prompt)],
+                tools=[SHADOW_PLAN_TOOL],
+                tool_choice="required",
+                call_name="shadow_replan",
+                **self.llm_args,
+            )
+            if not response.tool_calls or len(response.tool_calls) != 1:
+                raise ValueError("Replanner must submit exactly one plan")
+            plan_data = response.tool_calls[0].arguments.get("plan")
+            revised = PlanState.model_validate(plan_data)
+            self._merge_replanned_state(old_plan, revised)
+            state.plan = revised
+            state.required_customer_state_tools = self._required_state_tools(revised)
+            state.replan_count += 1
+            history.update(
+                {"status": "success", "plan": revised.model_dump(mode="json")}
+            )
+            self._refresh_current_step(revised)
+        except Exception as exc:
+            logger.warning(f"Shadow replan failed open: {exc}")
+            state.replan_count += 1
+            history.update({"error_type": type(exc).__name__, "error": str(exc)})
+        state.replan_history.append(history)
+        self._sync_plan_diagnostics(state)
+
+    @staticmethod
+    def _merge_replanned_state(old: PlanState, revised: PlanState) -> None:
+        """Force completed work from the old plan into a planner revision."""
+        completed_steps = {
+            step.id: step for step in old.steps if step.status == "completed"
+        }
+        revised_by_id = {step.id: step for step in revised.steps}
+        for step_id, step in completed_steps.items():
+            if step_id in revised_by_id:
+                revised_by_id[step_id].status = "completed"
             else:
-                return self.tools
-            return [by_name[name] for name in by_name if name in allowed]
+                revised.steps.insert(0, step)
+        completed_requests = {
+            request.id: request
+            for request in old.retrieval_requests
+            if request.status == "completed"
+        }
+        revised_requests = {
+            request.id: request for request in revised.retrieval_requests
+        }
+        for request_id, request in completed_requests.items():
+            if request_id in revised_requests:
+                revised_requests[request_id] = request
+            else:
+                revised_requests[request_id] = request
+        revised.retrieval_requests = list(revised_requests.values())
+        revised.current_step_id = None
 
-        # A workflow plan made before retrieval is a knowledge-free skeleton.
-        # Persist and observe it, but do not hide tools until a later refinement
-        # phase can turn retrieved policy into reliable executable steps. The
-        # strict tool gate above is limited to the explicit selection/user-state
-        # invariant that can be enforced without inventing workflow knowledge.
+    def _get_executor_tools(self, state: ShadowPlanningAgentState) -> list[Tool]:
+        """Return the full tool catalog while the plan remains a soft guide.
+
+        ``completion_evidence`` and the current ready step update Plan-State,
+        but they are not a tool whitelist. React must retain the ability to
+        perform supplemental retrieval, discover runtime tools, and use
+        auxiliary reads that the initial plan did not predict. Safety gates are
+        expressed in the execution context and enforced separately for
+        irreversible actions; hiding tools here makes planner omissions become
+        artificial task failures.
+        """
         return self.tools
 
     def _attach_execution_context(self, state: ShadowPlanningAgentState) -> None:

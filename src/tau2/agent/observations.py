@@ -26,3 +26,8 @@ class Observation(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
     result: Optional[str] = None
     success: Optional[bool] = None
+
+    @property
+    def normalized_tool_name(self) -> Optional[str]:
+        """Return the inner discoverable name, falling back to the wrapper."""
+        return self.tool_name

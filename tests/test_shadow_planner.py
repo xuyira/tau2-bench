@@ -1232,7 +1232,7 @@ def test_completion_evidence_matches_discoverable_tool_arguments(get_environment
     assert plan.steps[0].status == "completed"
 
 
-def test_selection_user_state_gate_restricts_executor_tools(get_environment):
+def test_selection_plan_keeps_full_executor_tools(get_environment):
     environment = get_environment()
     control_tool_names = [
         "get_current_time",
@@ -1286,21 +1286,19 @@ def test_selection_user_state_gate_restricts_executor_tools(get_environment):
         current_step_id="retrieve",
     )
 
-    assert [tool.name for tool in agent._get_executor_tools(state)] == ["KB_search"]
+    assert {tool.name for tool in agent._get_executor_tools(state)} == {
+        tool.name for tool in agent.tools
+    }
     request = state.plan.retrieval_requests[0]
     request.status = "completed"
     request.progress.coverage_complete = True
     assert {tool.name for tool in agent._get_executor_tools(state)} == {
-        "get_current_time",
-        "get_user_information_by_id",
-        "get_user_information_by_name",
-        "get_user_information_by_email",
-        "log_verification",
+        tool.name for tool in agent.tools
     }
     state.identity_verified = True
     state.required_customer_state_tools = ["get_referrals_by_user"]
     names = {tool.name for tool in agent._get_executor_tools(state)}
-    assert names == {"get_referrals_by_user"}
+    assert names == {tool.name for tool in agent.tools}
     state.customer_state_read = True
     assert {tool.name for tool in agent._get_executor_tools(state)} == {
         tool.name for tool in agent.tools

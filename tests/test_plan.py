@@ -204,6 +204,26 @@ def test_legacy_selection_retrieval_does_not_duplicate_top_level_request():
     assert [request.id for request in plan.retrieval_requests] == ["checking_products"]
 
 
+def test_ready_steps_follow_completed_dependencies():
+    plan = make_plan()
+    assert [step.id for step in plan.ready_steps()] == ["retrieve"]
+    plan.transition_step("retrieve", "completed")
+    assert [step.id for step in plan.ready_steps()] == ["act"]
+
+
+def test_blocked_is_a_nonterminal_runtime_state():
+    plan = make_plan()
+    plan.transition_step("retrieve", "blocked")
+    assert plan.steps[0].status == "blocked"
+
+
+def test_completed_step_cannot_be_reopened():
+    plan = make_plan()
+    plan.transition_step("retrieve", "completed")
+    with pytest.raises(ValueError, match="Completed plan step"):
+        plan.transition_step("retrieve", "ready")
+
+
 def test_legacy_selection_relevance_promotes_each_query():
     plan = make_plan(
         capabilities={TaskMode.SELECTION},

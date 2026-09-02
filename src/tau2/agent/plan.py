@@ -174,6 +174,7 @@ class PlanStep(BaseModel):
         "waiting_user",
         "completed",
         "failed",
+        "blocked",
         "skipped",
     ] = "pending"
 
@@ -418,3 +419,46 @@ class PlanState(BaseModel):
         for request_id in request_ids:
             visit_request(request_id)
         return self
+
+    def ready_steps(self) -> list[PlanStep]:
+        """Return pending steps whose dependencies have completed."""
+        completed = {step.id for step in self.steps if step.status == "completed"}
+        return [
+            step
+            for step in self.steps
+            if step.status in {"pending", "ready"} and set(step.depends_on) <= completed
+        ]
+
+    def transition_step(self, step_id: str, status: str) -> PlanStep:
+        """Apply a controlled step transition and return the updated step.
+
+        Completed steps are terminal. This method intentionally does not enforce
+        semantic correctness; runtime observations and a future replan decide
+        whether a pending step should be retried or blocked.
+        """
+        step = next(
+            (candidate for candidate in self.steps if candidate.id == step_id), None
+        )
+        if step is None:
+            raise ValueError(f"Unknown plan step: {step_id}")
+        if step.status == "completed" and status != "completed":
+            raise ValueError(f"Completed plan step cannot transition: {step_id}")
+        allowed = {
+            "pending",
+            "ready",
+            "in_progress",
+            "waiting_user",
+            "completed",
+            "failed",
+            "blocked",
+            "skipped",
+        }
+        if status not in allowed:
+            raise ValueError(f"Unknown plan step status: {status}")
+        step.status = status
+        self.current_step_id = (
+            step_id
+            if status in {"ready", "in_progress", "waiting_user"}
+            else self.current_step_id
+        )
+        return step

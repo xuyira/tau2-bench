@@ -10,6 +10,7 @@ from pydantic import Field, create_model
 
 from tau2.agent.base_agent import ValidAgentInputMessage
 from tau2.agent.llm_agent import LLMAgent, LLMAgentState
+from tau2.agent.observations import Observation
 from tau2.agent.plan import PlanState
 from tau2.data_model.message import (
     AssistantMessage,
@@ -136,6 +137,7 @@ class ShadowPlanningAgentState(LLMAgentState):
     customer_state_read: bool = False
     required_customer_state_tools: list[str] = Field(default_factory=list)
     customer_state_tools_read: list[str] = Field(default_factory=list)
+    observations: list[Observation] = Field(default_factory=list)
     bootstrap_evidence: Optional[str] = None
     bootstrap_retrieval_error: Optional[str] = None
     retrieval_evidence: dict[str, list[str]] = Field(default_factory=dict)
@@ -344,6 +346,14 @@ class ShadowPlanningLLMAgent(LLMAgent[ShadowPlanningAgentState]):
         """Record successful tool evidence and advance observable plan steps."""
         if state.plan is None:
             return
+        if isinstance(message, UserMessage):
+            state.observations.append(
+                Observation(
+                    event_id=f"user:{len(state.observations)}",
+                    event_type="user_message",
+                    result=message.content,
+                )
+            )
         tool_messages = (
             message.tool_messages
             if isinstance(message, MultiToolMessage)
@@ -360,6 +370,15 @@ class ShadowPlanningLLMAgent(LLMAgent[ShadowPlanningAgentState]):
         retrieval_observed = False
         observed_calls = []
         for tool_message in tool_messages:
+            state.observations.append(
+                Observation(
+                    event_id=tool_message.id
+                    or f"tool-result:{len(state.observations)}",
+                    event_type="tool_result",
+                    result=tool_message.content,
+                    success=not tool_message.error,
+                )
+            )
             if tool_message.error:
                 continue
             call = calls_by_id.get(tool_message.id)
@@ -367,6 +386,8 @@ class ShadowPlanningLLMAgent(LLMAgent[ShadowPlanningAgentState]):
                 continue
             state.completed_tool_calls.append(call.name)
             observed_calls.append(call)
+            state.observations[-1].tool_name = call.name
+            state.observations[-1].arguments = call.arguments
             if call.name == "KB_search":
                 retrieval_observed = True
                 self._record_retrieval_observation(
@@ -449,6 +470,26 @@ class ShadowPlanningLLMAgent(LLMAgent[ShadowPlanningAgentState]):
         """Advance one step whose declared evidence is this Executor output."""
         if state.plan is None:
             return
+        state.observations.append(
+            Observation(
+                event_id=f"assistant:{len(state.observations)}",
+                event_type="assistant_message",
+                result=response.content,
+                success=True,
+            )
+        )
+        for call in response.tool_calls or []:
+            inner_name = call.arguments.get("agent_tool_name")
+            state.observations.append(
+                Observation(
+                    event_id=call.id or f"tool-call:{len(state.observations)}",
+                    event_type="tool_call",
+                    tool_name=inner_name or call.name,
+                    wrapper_name=call.name if inner_name else None,
+                    arguments=call.arguments,
+                    success=True,
+                )
+            )
         output = "tool_call" if response.tool_calls else "text"
         self._complete_steps_from_evidence(
             state.plan,
@@ -585,6 +626,17 @@ class ShadowPlanningLLMAgent(LLMAgent[ShadowPlanningAgentState]):
             return False
 
         state.retrieval_evidence.setdefault(request.id, []).append(content)
+        state.observations.append(
+            Observation(
+                event_id=f"retrieval:{request.id}:{request.progress.attempts}",
+                event_type="retrieval_result",
+                tool_name="KB_search",
+                request_id=request.id,
+                arguments=call_arguments,
+                result=content,
+                success=True,
+            )
+        )
         self._record_retrieval_observation(state, call_arguments, content)
         return True
 
@@ -799,6 +851,10 @@ class ShadowPlanningLLMAgent(LLMAgent[ShadowPlanningAgentState]):
                 "customer_state_read": state.customer_state_read,
                 "required_customer_state_tools": state.required_customer_state_tools,
                 "customer_state_tools_read": state.customer_state_tools_read,
+                "observations": [
+                    observation.model_dump(mode="json")
+                    for observation in state.observations
+                ],
             }
 
     def _get_executor_tools(self, state: ShadowPlanningAgentState) -> list[Tool]:

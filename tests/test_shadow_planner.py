@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+from tau2.agent.observations import Observation
 from tau2.agent.plan import PlanState, RetrievalPlan, SelectionPlan
 from tau2.agent.shadow_planner import ShadowPlanningLLMAgent
 from tau2.data_model.message import (
@@ -112,6 +113,19 @@ def test_step_tool_names_are_explicit_only():
     assert ShadowPlanningLLMAgent._step_tool_names(plan.steps[0]) == {
         "get_referrals_by_user"
     }
+
+
+def test_observation_normalizes_wrapper_tool_name():
+    observation = Observation(
+        event_id="call-1",
+        event_type="tool_call",
+        tool_name="get_referrals_by_user",
+        wrapper_name="call_discoverable_agent_tool",
+        arguments={"agent_tool_name": "get_referrals_by_user"},
+        success=True,
+    )
+    assert observation.tool_name == "get_referrals_by_user"
+    assert observation.wrapper_name == "call_discoverable_agent_tool"
 
 
 def make_agent(get_environment):

@@ -14,10 +14,15 @@ def _ensure_registered():
         return
     import tau2.knowledge.document_preprocessors.bm25_indexer  # noqa: F401
     import tau2.knowledge.document_preprocessors.embedding_indexer  # noqa: F401
+    import tau2.knowledge.document_preprocessors.markdown_semantic_chunker  # noqa: F401
     import tau2.knowledge.input_preprocessors.embedding_encoder  # noqa: F401
     import tau2.knowledge.postprocessors.bge_reranker  # noqa: F401
+    import tau2.knowledge.postprocessors.cross_encoder_reranker  # noqa: F401
+    import tau2.knowledge.postprocessors.parent_document_collapse  # noqa: F401
+    import tau2.knowledge.postprocessors.parent_first_chunk_reranker  # noqa: F401
     import tau2.knowledge.postprocessors.pointwise_llm_reranker  # noqa: F401
     import tau2.knowledge.postprocessors.qwen_reranker  # noqa: F401
+    import tau2.knowledge.retrievers.bm25_dense_rrf_retriever  # noqa: F401
     import tau2.knowledge.retrievers.bm25_retriever  # noqa: F401
     import tau2.knowledge.retrievers.cosine_retriever  # noqa: F401
     import tau2.knowledge.retrievers.grep_retriever  # noqa: F401

@@ -5,6 +5,9 @@ import numpy as np
 from tau2.knowledge.document_preprocessors.base import (
     BaseDocumentPreprocessor,
 )
+from tau2.knowledge.document_preprocessors.search_text import (
+    build_document_search_text,
+)
 from tau2.knowledge.embedders import (
     BailianEmbedder,
     OpenAIEmbedder,
@@ -74,18 +77,10 @@ class EmbeddingIndexer(BaseDocumentPreprocessor):
         docs_for_cache = [
             {
                 "id": doc["id"],
-                "text": doc.get(self.content_field)
-                or doc.get("content")
-                or doc.get("text"),
+                "text": build_document_search_text(doc, self.content_field),
             }
             for doc in documents
         ]
-
-        for doc, cache_doc in zip(documents, docs_for_cache):
-            if cache_doc["text"] is None:
-                raise ValueError(
-                    f"Document {doc.get('id', 'unknown')} missing content field"
-                )
 
         if self.use_cache:
             cache = get_embeddings_cache()

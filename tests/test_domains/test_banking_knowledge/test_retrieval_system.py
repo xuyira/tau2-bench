@@ -433,6 +433,162 @@ class TestBM25Retriever:
         assert scores == sorted(scores, reverse=True)
 
 
+class TestBM25DenseRRFRetriever:
+    """Tests for rank-based BM25 and dense fusion."""
+
+    def test_retrieve_rewards_documents_found_by_both_retrievers(self):
+        from tau2.knowledge.retrievers.bm25_dense_rrf_retriever import (
+            BM25DenseRRFRetriever,
+        )
+
+        docs = [
+            {"id": "sparse_only", "text": "referral bonus"},
+            {"id": "shared", "text": "referral"},
+            {"id": "dense_only", "text": "unrelated"},
+        ]
+        state = _make_bm25_state(docs)
+        state["doc_embeddings"] = np.array(
+            [[0.0, 1.0], [0.8, 0.2], [1.0, 0.0]], dtype=float
+        )
+        state["doc_embeddings_doc_ids"] = [doc["id"] for doc in docs]
+
+        retriever = BM25DenseRRFRetriever(candidate_top_k=2, top_k=3, rrf_k=60)
+        results = retriever.retrieve(
+            {"query": "referral bonus", "query_embedding": np.array([1.0, 0.0])},
+            state,
+        )
+
+        assert results[0][0] == "shared"
+        assert len({doc_id for doc_id, _ in results}) == len(results)
+        assert results == sorted(results, key=lambda item: item[1], reverse=True)
+
+    def test_missing_query_or_embedding_returns_empty(self):
+        from tau2.knowledge.retrievers.bm25_dense_rrf_retriever import (
+            BM25DenseRRFRetriever,
+        )
+
+        retriever = BM25DenseRRFRetriever()
+        assert retriever.retrieve({"query": ""}, {}) == []
+        assert retriever.retrieve({"query": "referral"}, {}) == []
+
+    def test_rejects_invalid_parameters(self):
+        from tau2.knowledge.retrievers.bm25_dense_rrf_retriever import (
+            BM25DenseRRFRetriever,
+        )
+
+        with pytest.raises(ValueError, match="positive"):
+            BM25DenseRRFRetriever(candidate_top_k=0)
+        with pytest.raises(ValueError, match="At least one"):
+            BM25DenseRRFRetriever(bm25_weight=0, dense_weight=0)
+
+
+class TestCrossEncoderReranker:
+    def test_reranks_candidates_with_title_and_content(self):
+        from tau2.knowledge.postprocessors.cross_encoder_reranker import (
+            CrossEncoderReranker,
+        )
+
+        model = MagicMock()
+        model.predict.return_value = np.array([0.2, 0.9])
+        reranker = CrossEncoderReranker(top_k=2)
+        reranker._model = model
+        state = {
+            "doc_title_map": {"a": "Alpha", "b": "Beta"},
+            "doc_content_map": {"a": "First", "b": "Second"},
+        }
+
+        results = reranker.process(
+            [("a", 0.8), ("b", 0.7)], {"query": "best document"}, state
+        )
+
+        assert results == [("b", 0.9), ("a", 0.2)]
+        model.predict.assert_called_once_with(
+            [
+                ("best document", "Alpha\nFirst"),
+                ("best document", "Beta\nSecond"),
+            ],
+            batch_size=8,
+            show_progress_bar=False,
+        )
+
+
+class TestParentFirstChunkReranker:
+    def test_reranks_parent_candidates_by_best_chunk(self):
+        from tau2.knowledge.postprocessors.parent_first_chunk_reranker import (
+            ParentFirstChunkReranker,
+        )
+
+        model = MagicMock()
+        model.predict.return_value = np.array([0.1, 0.9, 0.4])
+        reranker = ParentFirstChunkReranker(top_k=2, chunk_max_chars=50, batch_size=1)
+        reranker._model = model
+        state = {
+            "doc_title_map": {"a": "Alpha", "b": "Beta"},
+            "doc_content_map": {
+                "a": "## One\n" + "a" * 40 + "\n\n## Two\n" + "b" * 40,
+                "b": "Short content",
+            },
+        }
+
+        results = reranker.process([("a", 0.8), ("b", 0.7)], {"query": "best"}, state)
+
+        assert results == [("a", 0.9), ("b", 0.4)]
+        assert len(model.predict.call_args.args[0]) == 3
+
+
+class TestMarkdownSemanticChunking:
+    def test_short_document_stays_whole_and_keeps_context(self):
+        from tau2.knowledge.document_preprocessors.markdown_semantic_chunker import (
+            MarkdownSemanticChunker,
+        )
+
+        document = {
+            "id": "doc_checking_accounts_blue_account_001",
+            "title": "Blue Account at a glance",
+            "text": "## Referral program\nYou earn $35.",
+        }
+        state = {}
+        chunks = MarkdownSemanticChunker(max_chars=2000).process([document], state)
+
+        assert len(chunks) == 1
+        assert chunks[0]["id"].endswith("::chunk_001")
+        assert chunks[0]["normalized_id"] == "checking accounts blue account"
+        assert chunks[0]["title"] == "Blue Account at a glance"
+        assert chunks[0]["text"].startswith("## Referral program")
+        rerank_text = state["chunk_rerank_text_map"][chunks[0]["id"]]
+        assert rerank_text.count("ID: checking accounts blue account") == 1
+        assert rerank_text.count("Title: Blue Account at a glance") == 1
+        assert state["chunk_parent_map"][chunks[0]["id"]] == document["id"]
+
+    def test_long_document_splits_at_markdown_sections(self):
+        from tau2.knowledge.document_preprocessors.markdown_semantic_chunker import (
+            MarkdownSemanticChunker,
+        )
+
+        document = {
+            "id": "doc_checking_accounts_blue_account_010",
+            "title": "FAQ: Blue Account",
+            "text": "## First\n" + "a" * 80 + "\n\n## Second\n" + "b" * 80,
+        }
+        chunks = MarkdownSemanticChunker(max_chars=100).process([document], {})
+
+        assert len(chunks) == 2
+        assert chunks[0]["section"] == "First"
+        assert chunks[1]["section"] == "Second"
+
+    def test_parent_collapse_deduplicates_chunks(self):
+        from tau2.knowledge.postprocessors.parent_document_collapse import (
+            ParentDocumentCollapse,
+        )
+
+        results = ParentDocumentCollapse(top_k=2).process(
+            [("a::1", 0.9), ("a::2", 0.8), ("b::1", 0.7)],
+            {},
+            {"chunk_parent_map": {"a::1": "a", "a::2": "a", "b::1": "b"}},
+        )
+        assert results == [("a", 0.9), ("b", 0.7)]
+
+
 # ============================================================================
 # 4. GrepRetriever tests
 # ============================================================================
@@ -683,6 +839,98 @@ class TestBM25Indexer:
         docs = [{"id": "d1", "content": "hello world"}]
         indexer.process(docs, state)
         assert "bm25" in state
+
+    def test_process_indexes_normalized_document_id_and_title(self):
+        indexer = self._make_indexer()
+        state: Dict[str, Any] = {}
+        docs = [
+            {
+                "id": "doc_unique_document_identifier_001",
+                "title": "Exclusive Referral Handbook",
+                "text": "Generic account information.",
+            },
+            {
+                "id": "other_document",
+                "title": "Other Handbook",
+                "text": "Other generic information.",
+            },
+            {
+                "id": "third_document",
+                "title": "Account Guide",
+                "text": "Additional generic information.",
+            },
+        ]
+        indexer.process(docs, state)
+
+        title_scores = state["bm25"].get_scores(["exclusive", "referral"])
+        id_scores = state["bm25"].get_scores(["unique", "identifier"])
+
+        assert title_scores[0] > title_scores[1]
+        assert id_scores[0] > id_scores[1]
+
+    def test_normalize_document_id(self):
+        from tau2.knowledge.document_preprocessors.search_text import (
+            normalize_document_id,
+        )
+
+        assert (
+            normalize_document_id("doc_business_checking_accounts_cobalt_blue_005")
+            == "business checking accounts cobalt blue"
+        )
+
+    def test_build_document_metadata_uses_only_explicit_id_facts(self):
+        from tau2.knowledge.document_preprocessors.search_text import (
+            build_document_metadata,
+        )
+
+        metadata = build_document_metadata(
+            "doc_business_credit_cards_green_rewards_card_001"
+        )
+        assert metadata["resource_type"] == "product"
+        assert metadata["customer_segment"] == "business"
+        assert metadata["product_category"] == "business_credit_card"
+        assert metadata["product_name_candidate"] == "green rewards card"
+        assert metadata["document_index"] == 1
+
+        service = build_document_metadata("doc_everyone_pay_qr_transfers_002")
+        assert service["resource_type"] == "service"
+        assert service["service_category"] == "everyone_pay"
+        assert service["product_category"] == "unknown"
+        assert service["customer_segment"] == "unknown"
+
+        unknown_segment = build_document_metadata("doc_credit_cards_ecocard_011")
+        assert unknown_segment["customer_segment"] == "unknown"
+
+
+class TestEmbeddingIndexer:
+    """Tests for the dense embedding document preprocessor."""
+
+    def test_process_embeds_normalized_document_id_title_and_content(self):
+        from tau2.knowledge.document_preprocessors.embedding_indexer import (
+            EmbeddingIndexer,
+        )
+
+        embedder = MagicMock()
+        embedder.embed.return_value = np.array([[1.0, 0.0]])
+        indexer = EmbeddingIndexer(use_cache=False)
+        indexer._embedder = embedder
+        documents = [
+            {
+                "id": "doc_referral_001",
+                "title": "Referral Program",
+                "text": "The combined bonus is $65.",
+            }
+        ]
+
+        indexer.process(documents, {})
+
+        embedder.embed.assert_called_once_with(
+            [
+                "ID: referral\n"
+                "Title: Referral Program\n"
+                "Content:\nThe combined bonus is $65."
+            ]
+        )
 
 
 # ============================================================================
@@ -1124,6 +1372,49 @@ class TestRetrievalVariantRegistry:
         assert variant.kb_search.top_k == 7
         assert variant.supports_top_k is True
 
+    def test_hybrid_rrf_variant(self):
+        from tau2.domains.banking_knowledge.retrieval import resolve_variant
+
+        variant = resolve_variant("hybrid_rrf", top_k=7)
+        assert variant.kb_search.type == "hybrid_rrf"
+        assert variant.kb_search.embedder_type == "bailian"
+        assert variant.kb_search.top_k == 7
+        assert variant.kb_search.candidate_top_k == 50
+        assert variant.kb_search.rrf_k == 60
+
+    def test_hybrid_rrf_cross_encoder_variant(self):
+        from tau2.domains.banking_knowledge.retrieval import resolve_variant
+
+        variant = resolve_variant("hybrid_rrf_cross_encoder")
+        assert variant.kb_search.type == "hybrid_rrf"
+        assert variant.kb_search.cross_encoder_reranker is True
+        assert variant.kb_search.top_k == 10
+
+    def test_hybrid_rrf_bge_variant(self):
+        from tau2.domains.banking_knowledge.retrieval import resolve_variant
+
+        variant = resolve_variant("hybrid_rrf_bge")
+        assert variant.kb_search.cross_encoder_reranker is True
+        assert variant.kb_search.cross_encoder_model == "BAAI/bge-reranker-v2-m3"
+        assert variant.kb_search.cross_encoder_batch_size == 1
+        assert variant.kb_search.cross_encoder_max_length == 2048
+
+    def test_hybrid_rrf_smart_chunks_variant(self):
+        from tau2.domains.banking_knowledge.retrieval import resolve_variant
+
+        variant = resolve_variant("hybrid_rrf_smart_chunks")
+        assert variant.kb_search.semantic_chunking is True
+        assert variant.kb_search.chunk_max_chars == 2000
+        assert variant.kb_search.cross_encoder_reranker is True
+
+    def test_hybrid_rrf_parent_first_chunks_variant(self):
+        from tau2.domains.banking_knowledge.retrieval import resolve_variant
+
+        variant = resolve_variant("hybrid_rrf_parent_first_chunks")
+        assert variant.kb_search.parent_first_chunk_reranker is True
+        assert variant.kb_search.semantic_chunking is False
+        assert variant.kb_search.candidate_top_k == 50
+
     def test_grep_only_variant(self):
         from tau2.domains.banking_knowledge.retrieval import resolve_variant
 
@@ -1289,8 +1580,14 @@ class TestBM25GrepVariant:
 
         assert resolve_variant("bm25_grep").supports_top_k is True
 
+    @patch(
+        "tau2.domains.banking_knowledge.metadata.load_product_catalog_review",
+        return_value={},
+    )
     @patch("tau2.domains.banking_knowledge.retrieval.get_or_create_docs")
-    def test_build_tools_has_kb_search_and_grep(self, mock_get_docs, mock_kb):
+    def test_build_tools_has_kb_search_and_grep(
+        self, mock_get_docs, _mock_review, mock_kb
+    ):
         """bm25_grep should provide a toolkit with KB_search and grep tools."""
         mock_get_docs.return_value = SAMPLE_DOCUMENTS
         from tau2.domains.banking_knowledge.data_model import TransactionalDB
@@ -1305,8 +1602,14 @@ class TestBM25GrepVariant:
         assert toolkit.has_tool("KB_search")
         assert toolkit.has_tool("grep")
 
+    @patch(
+        "tau2.domains.banking_knowledge.metadata.load_product_catalog_review",
+        return_value={},
+    )
     @patch("tau2.domains.banking_knowledge.retrieval.get_or_create_docs")
-    def test_build_tools_returns_correct_toolkit_class(self, mock_get_docs, mock_kb):
+    def test_build_tools_returns_correct_toolkit_class(
+        self, mock_get_docs, _mock_review, mock_kb
+    ):
         """build_tools should return KnowledgeToolsWithKBSearchAndGrep."""
         mock_get_docs.return_value = SAMPLE_DOCUMENTS
         from tau2.domains.banking_knowledge.data_model import TransactionalDB
@@ -1382,8 +1685,12 @@ class TestBM25Variant:
 
         assert resolve_variant("bm25").name == "bm25"
 
+    @patch(
+        "tau2.domains.banking_knowledge.metadata.load_product_catalog_review",
+        return_value={},
+    )
     @patch("tau2.domains.banking_knowledge.retrieval.get_or_create_docs")
-    def test_build_tools_has_kb_search(self, mock_get_docs, mock_kb):
+    def test_build_tools_has_kb_search(self, mock_get_docs, _mock_review, mock_kb):
         mock_get_docs.return_value = SAMPLE_DOCUMENTS
         from tau2.domains.banking_knowledge.data_model import TransactionalDB
         from tau2.domains.banking_knowledge.retrieval import (
@@ -1481,6 +1788,10 @@ class TestToolCreation:
     def test_kb_search_tool_includes_timing(self, kb_search_toolkit):
         output = kb_search_toolkit.KB_search(query="fee")
         assert "[Timing:" in output
+
+    def test_kb_search_all_products_requires_category(self, kb_search_toolkit):
+        with pytest.raises(ValueError, match="product_category is required"):
+            kb_search_toolkit.KB_search(query="fee", coverage="all_products")
 
     def test_grep_tool_name(self, grep_toolkit):
         assert grep_toolkit.has_tool("grep")
@@ -1595,8 +1906,12 @@ class TestEndToEndPipelines:
         batch = pipeline.retrieve_batch(["credit", "savings"])
         assert len(batch) == 2
 
+    @patch(
+        "tau2.domains.banking_knowledge.metadata.load_product_catalog_review",
+        return_value={},
+    )
     @patch("tau2.domains.banking_knowledge.retrieval.get_or_create_docs")
-    def test_bm25_grep_build_tools_e2e(self, mock_get_docs, mock_kb):
+    def test_bm25_grep_build_tools_e2e(self, mock_get_docs, _mock_review, mock_kb):
         """Full end-to-end test: bm25_grep variant → build_tools → call tools."""
         mock_get_docs.return_value = SAMPLE_DOCUMENTS
         from tau2.domains.banking_knowledge.data_model import TransactionalDB

@@ -5,6 +5,9 @@ from rank_bm25 import BM25Okapi
 from tau2.knowledge.document_preprocessors.base import (
     BaseDocumentPreprocessor,
 )
+from tau2.knowledge.document_preprocessors.search_text import (
+    build_document_search_text,
+)
 from tau2.knowledge.registry import register_document_preprocessor
 
 
@@ -27,14 +30,9 @@ class BM25Indexer(BaseDocumentPreprocessor):
     def process(
         self, documents: List[Dict[str, Any]], state: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
-        texts = []
-        for doc in documents:
-            text = doc.get(self.content_field) or doc.get("content") or doc.get("text")
-            if text is None:
-                raise ValueError(
-                    f"Document {doc.get('id', 'unknown')} missing content field"
-                )
-            texts.append(text)
+        texts = [
+            build_document_search_text(doc, self.content_field) for doc in documents
+        ]
 
         tokenized_corpus = [text.lower().split() for text in texts]
         bm25 = BM25Okapi(tokenized_corpus)

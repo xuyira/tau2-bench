@@ -30,6 +30,11 @@ Requirements: **sandbox-runtime** for `shell`, and an embedding API for dense se
 | `golden_retrieval` | None | None (offline) |
 | `grep_only` | `grep` | None (offline) |
 | `bm25` | `KB_search` | None (offline) |
+| `hybrid_rrf` | `KB_search` | `DASHSCOPE_API_KEY`, `DASHSCOPE_BASE_URL` |
+| `hybrid_rrf_cross_encoder` | `KB_search` | Bailian config + local CPU cross-encoder |
+| `hybrid_rrf_bge` | `KB_search` | Bailian config + local CPU BGE v2-m3 reranker |
+| `hybrid_rrf_smart_chunks` | `KB_search` | Bailian config + local CPU MiniLM reranker |
+| `hybrid_rrf_parent_first_chunks` | `KB_search` | Full-document RRF + local CPU chunk reranker |
 | `openai_embeddings` | `KB_search` | `OPENAI_API_KEY` |
 | `qwen_embeddings` | `KB_search` | `OPENROUTER_API_KEY` |
 | `terminal_use` | `shell` | `sandbox-runtime` (see below) |
@@ -46,7 +51,7 @@ Note: `*_reranker` variants always require `OPENAI_API_KEY` for the pointwise LL
 
 ## Embedding Cache
 
-Embedding-based configs (`openai_embeddings*`, `qwen_embeddings*`, `alltools`, `alltools-qwen`) cache document embeddings on disk at `data/.embeddings_cache` (gitignored). This avoids re-computing embeddings on repeated runs. The cache is automatically invalidated when document content changes.
+Embedding-based configs (`openai_embeddings*`, `qwen_embeddings*`, `hybrid_rrf`, `alltools`, `alltools-qwen`) cache document embeddings on disk at `data/.embeddings_cache` (gitignored). This avoids re-computing embeddings on repeated runs. The cache is automatically invalidated when document content changes.
 
 ## Additional Setup
 

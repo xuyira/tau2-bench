@@ -814,6 +814,17 @@ class Orchestrator(BaseOrchestrator[AgentT, UserT, Message]):
             mode=self.mode.value,
             speech_environment=speech_environment,
         )
+        diagnostics_getter = getattr(self.agent, "get_simulation_diagnostics", None)
+        if callable(diagnostics_getter):
+            try:
+                diagnostics = diagnostics_getter()
+                if diagnostics:
+                    simulation_run.info = {
+                        **(simulation_run.info or {}),
+                        **diagnostics,
+                    }
+            except Exception as e:
+                logger.warning(f"Error collecting agent diagnostics: {e}")
         return simulation_run
 
     def step(self):

@@ -1,7 +1,7 @@
 from typing import Generic, List, Optional, TypeVar
 
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from tau2.agent.base.llm_config import LLMConfigMixin
 from tau2.agent.base_agent import (
@@ -45,6 +45,8 @@ class LLMAgentState(BaseModel):
     """The state of the agent."""
 
     system_messages: list[SystemMessage]
+    # Context supplied by orchestration layers; never treated as conversation history.
+    readonly_context: list[SystemMessage] = Field(default_factory=list)
     messages: list[APICompatibleMessage]
 
 
@@ -124,7 +126,7 @@ class LLMAgent(
             state.messages.extend(message.tool_messages)
         else:
             state.messages.append(message)
-        messages = state.system_messages + state.messages
+        messages = state.system_messages + state.readonly_context + state.messages
         assistant_message = generate(
             model=self.llm,
             tools=self.tools,
@@ -248,7 +250,7 @@ class LLMGTAgent(
             state.messages.extend(message.tool_messages)
         else:
             state.messages.append(message)
-        messages = state.system_messages + state.messages
+        messages = state.system_messages + state.readonly_context + state.messages
         assistant_message = generate(
             model=self.llm,
             tools=self.tools,
@@ -465,7 +467,7 @@ class LLMSoloAgent(
             assert len(state.messages) == 0, "Message history should be empty"
         else:
             state.messages.append(message)
-        messages = state.system_messages + state.messages
+        messages = state.system_messages + state.readonly_context + state.messages
         assistant_message = generate(
             model=self.llm,
             tools=self.tools,

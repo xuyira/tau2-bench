@@ -14,6 +14,7 @@ from tau2.agent.llm_agent import (
     create_llm_gt_agent,
     create_llm_solo_agent,
 )
+from tau2.agent.shadow_planner import create_shadow_planning_llm_agent
 from tau2.data_model.tasks import Task
 from tau2.domains.airline.environment import (
     get_environment as airline_domain_get_environment,
@@ -295,6 +296,9 @@ try:
 
     # Agent factories
     registry.register_agent_factory(create_llm_agent, "llm_agent")
+    registry.register_agent_factory(
+        create_shadow_planning_llm_agent, "llm_agent_shadow_plan"
+    )
     registry.register_agent_factory(
         create_llm_gt_agent,
         "llm_agent_gt",

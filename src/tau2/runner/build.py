@@ -122,6 +122,7 @@ def build_agent(
         task=task,
         audio_native_config=audio_native_config,
         audio_taps_dir=audio_taps_dir,
+        metadata_catalog=environment.get_metadata_catalog(),
     )
 
 

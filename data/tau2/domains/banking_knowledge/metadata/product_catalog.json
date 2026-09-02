@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "categories": {
+    "business_checking_account": {
+      "products": [
+        "Beige",
+        "Cobalt Blue",
+        "Hunter Green",
+        "Lime Green",
+        "Navy Blue",
+        "Sky Blue",
+        "True Blue",
+        "World Blue"
+      ],
+      "excluded_candidates": []
+    },
+    "business_credit_card": {
+      "products": [
+        "Business Bronze Rewards Card",
+        "Business Gold Rewards Card",
+        "Business Platinum Rewards Card",
+        "Business Silver Rewards Card",
+        "Green Rewards Card",
+        "Silver Zoom Card"
+      ],
+      "excluded_candidates": [
+        "Virtual Card Management"
+      ]
+    },
+    "business_savings_account": {
+      "products": [
+        "Bronze Saver Account",
+        "Diamond Vault",
+        "Emerald Saver",
+        "Gold Plus Saver",
+        "Gold Saver Account",
+        "Platinum Reserve Account",
+        "Silver Plus Saver",
+        "Silver Saver Account"
+      ],
+      "excluded_candidates": [
+        "Automatic Sweep Program",
+        "Joint Business Holders + User Roles"
+      ]
+    },
+    "checking_account": {
+      "products": [
+        "Blue Account",
+        "Bluest Account",
+        "Dark Green Account",
+        "Evergreen Account",
+        "Gold Years Account",
+        "Green Account (Checking)",
+        "Green Fee-Free Account",
+        "Light Blue Account",
+        "Light Green Account",
+        "Purple Account"
+      ],
+      "excluded_candidates": []
+    },
+    "credit_card": {
+      "products": [
+        "Bronze Rewards Card",
+        "Diamond Elite Card",
+        "Ecocard",
+        "Gold Rewards Card",
+        "Platinum Rewards Card",
+        "Silver Rewards Card"
+      ],
+      "excluded_candidates": [
+        "Credit Card Account Logistics",
+        "Credit Card Replacements",
+        "Crypto-Cash Back",
+        "Virtual Card Management"
+      ]
+    },
+    "savings_account": {
+      "products": [
+        "Bronze Account",
+        "Diamond Elite Account",
+        "Gold Account",
+        "Gold Plus Account",
+        "Green Account (Savings)",
+        "Platinum Account",
+        "Platinum Plus Account",
+        "Silver Account",
+        "Silver Plus Account"
+      ],
+      "excluded_candidates": []
+    }
+  }
+}

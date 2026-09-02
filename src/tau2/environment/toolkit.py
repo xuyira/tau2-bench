@@ -231,6 +231,10 @@ class ToolKitBase(metaclass=ToolKitType):
             "num_generic_tools": num_generic_tools,
         }
 
+    def get_metadata_catalog(self) -> dict[str, Any]:
+        """Return runtime knowledge metadata exposed by this toolkit, if any."""
+        return {}
+
     def update_db(self, update_data: Optional[dict[str, Any]] = None):
         """Update the database of the ToolKit."""
         if update_data is None:

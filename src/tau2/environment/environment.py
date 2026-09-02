@@ -82,6 +82,12 @@ class Environment:
             raise ValueError("Tools not available")
         return list(self.tools.get_tools().values())
 
+    def get_metadata_catalog(self) -> dict[str, Any]:
+        """Return runtime metadata derived from the environment's current data."""
+        if self.tools is None:
+            return {}
+        return self.tools.get_metadata_catalog()
+
     def get_user_tools(self, include: Optional[list[str]] = None) -> list[Tool]:
         """
         Get the user tools of the domain, optionally filtered by name.

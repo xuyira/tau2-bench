@@ -9,6 +9,9 @@ the required attributes (e.g., _kb_pipeline, _grep_pipeline, _sandbox)
 during its own __init__.
 """
 
+import json
+from typing import Literal, Optional
+
 from tau2.environment.toolkit import ToolKitType, ToolType, is_tool
 
 
@@ -17,8 +20,15 @@ def _format_kb_search_result(pipeline, retrieval_result) -> str:
     results = retrieval_result.results
     timing = retrieval_result.timing
 
+    coverage_output = ""
+    if retrieval_result.coverage is not None:
+        coverage_output = (
+            "[Product Coverage]\n"
+            f"{json.dumps(retrieval_result.coverage, ensure_ascii=False)}\n\n"
+        )
+
     if not results:
-        output = "No relevant documents found."
+        output = coverage_output + "No relevant documents found."
         output += f"\n\n[Timing: retrieval={timing.retrieval_ms:.0f}ms"
         if timing.postprocessing_ms > 0:
             output += f", reranking={timing.postprocessing_ms:.0f}ms"
@@ -36,7 +46,7 @@ def _format_kb_search_result(pipeline, retrieval_result) -> str:
             f"   Content: {content}\n"
         )
 
-    output = "\n".join(formatted)
+    output = coverage_output + "\n".join(formatted)
     output += f"\n\n[Timing: retrieval={timing.retrieval_ms:.0f}ms"
     if timing.postprocessing_ms > 0:
         output += f", reranking={timing.postprocessing_ms:.0f}ms"
@@ -44,11 +54,18 @@ def _format_kb_search_result(pipeline, retrieval_result) -> str:
     return output
 
 
-def _run_kb_search(pipeline, query: str, top_k: int | None = None) -> str:
+def _run_kb_search(
+    pipeline,
+    query: str,
+    top_k: int | None = None,
+    retrieval_scope: dict | None = None,
+) -> str:
     """Run a KB search pipeline with timing and shared formatting."""
     retrieve_kwargs = {"return_timing": True}
     if top_k is not None:
         retrieve_kwargs["top_k"] = top_k
+    if retrieval_scope is not None:
+        retrieve_kwargs["retrieval_scope"] = retrieval_scope
     retrieval_result = pipeline.retrieve(query, **retrieve_kwargs)
     return _format_kb_search_result(pipeline, retrieval_result)
 
@@ -61,17 +78,45 @@ class KBSearchMixin(metaclass=ToolKitType):
     """
 
     @is_tool(ToolType.READ)
-    def KB_search(self, query: str) -> str:
+    def KB_search(
+        self,
+        query: str,
+        product_category: Optional[str] = None,
+        product_names: Optional[list[str]] = None,
+        coverage: Literal["relevance", "all_products"] = "relevance",
+    ) -> str:
         """Search the knowledge base for relevant documents.
 
         Args:
             query: The search query to find relevant documents
+            product_category: Product category from the runtime metadata catalog.
+            product_names: Products to search within the category. Pass all missing
+                products from the previous result when continuing coverage.
+            coverage: Use all_products to return at most one full document per
+                product and report covered and missing products.
 
         Returns:
             Relevant document excerpts matching the query
         """
         # TODO: clean up knowledge retrieval pipelines to return structure results
-        return _run_kb_search(self._kb_pipeline, query)
+        if coverage == "all_products" and not product_category:
+            raise ValueError(
+                "product_category is required when coverage is all_products"
+            )
+        if product_names and not product_category:
+            raise ValueError("product_category is required with product_names")
+        retrieval_scope = None
+        if coverage == "all_products" or product_category or product_names:
+            retrieval_scope = {
+                "product_category": product_category,
+                "product_names": product_names,
+                "coverage": coverage,
+            }
+        return _run_kb_search(
+            self._kb_pipeline,
+            query,
+            retrieval_scope=retrieval_scope,
+        )
 
 
 class GrepMixin(metaclass=ToolKitType):

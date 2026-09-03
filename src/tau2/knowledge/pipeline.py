@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from tau2.knowledge.document_preprocessors.search_text import build_document_metadata
 from tau2.knowledge.registry import (
     get_document_preprocessor,
     get_input_preprocessor,
@@ -91,6 +92,23 @@ class RetrievalPipeline:
     def index_documents(self, documents: List[Dict[str, Any]]) -> None:
         if not documents:
             raise ValueError("Documents list is empty.")
+
+        document_metadata = {
+            doc["id"]: build_document_metadata(str(doc["id"])) for doc in documents
+        }
+        metadata_catalog: Dict[str, Dict[str, List[str]]] = {}
+        for doc_id, metadata in document_metadata.items():
+            if metadata["resource_type"] != "product":
+                continue
+            product_name = str(metadata["product_name_candidate"])
+            if product_name == "unknown":
+                continue
+            category = str(metadata["product_category"])
+            metadata_catalog.setdefault(category, {}).setdefault(
+                product_name.title(), []
+            ).append(doc_id)
+        self.state["document_metadata"] = document_metadata
+        self.state["metadata_catalog"] = metadata_catalog
 
         for preprocessor in self.doc_preprocessors:
             documents = preprocessor.process(documents, self.state)
@@ -240,6 +258,54 @@ class RetrievalPipeline:
 
     def get_document_title(self, doc_id: str) -> Optional[str]:
         return self.state.get("doc_title_map", {}).get(doc_id)
+
+    def get_metadata_catalog(self) -> Dict[str, Dict[str, List[str]]]:
+        """Return the indexed product/category metadata catalog."""
+        return self.state.get("metadata_catalog", {})
+
+    def apply_product_catalog_review(
+        self, review: Dict[str, Dict[str, List[str]]]
+    ) -> None:
+        """Validate and filter ID-derived product candidates using a review catalog."""
+        candidates = self.get_metadata_catalog()
+        candidate_categories = set(candidates)
+        reviewed_categories = set(review)
+        if candidate_categories != reviewed_categories:
+            missing = sorted(candidate_categories - reviewed_categories)
+            stale = sorted(reviewed_categories - candidate_categories)
+            raise ValueError(
+                "Product catalog review categories are out of sync with the "
+                f"knowledge base; unreviewed={missing}, stale={stale}"
+            )
+
+        confirmed_catalog: Dict[str, Dict[str, List[str]]] = {}
+        for category, candidate_products in candidates.items():
+            category_review = review[category]
+            confirmed = list(category_review.get("products", []))
+            excluded = list(category_review.get("excluded_candidates", []))
+            reviewed_names = confirmed + excluded
+            duplicate_names = sorted(
+                {name for name in reviewed_names if reviewed_names.count(name) > 1}
+            )
+            if duplicate_names:
+                raise ValueError(
+                    f"Duplicate product catalog review names for {category}: "
+                    f"{duplicate_names}"
+                )
+            candidate_names = set(candidate_products)
+            reviewed_name_set = set(reviewed_names)
+            if candidate_names != reviewed_name_set:
+                unreviewed = sorted(candidate_names - reviewed_name_set)
+                stale = sorted(reviewed_name_set - candidate_names)
+                raise ValueError(
+                    f"Product catalog review for {category} is out of sync with "
+                    f"the knowledge base; unreviewed={unreviewed}, stale={stale}"
+                )
+            confirmed_catalog[category] = {
+                name: candidate_products[name] for name in confirmed
+            }
+        self.state["metadata_catalog_candidates"] = candidates
+        self.state["metadata_catalog"] = confirmed_catalog
 
     def save_state(self, path: str) -> None:
         state_path = Path(path)

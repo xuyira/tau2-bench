@@ -37,6 +37,7 @@ def get_now() -> datetime:
 
 KNOWLEDGE_DATA_DIR = DATA_DIR / "tau2" / "domains" / "banking_knowledge"
 KNOWLEDGE_DOCUMENTS_DIR = KNOWLEDGE_DATA_DIR / "documents"
+KNOWLEDGE_METADATA_DIR = KNOWLEDGE_DATA_DIR / "metadata"
 KNOWLEDGE_TASK_SET_PATH = KNOWLEDGE_DATA_DIR / "tasks"
 
 # Transactional database path (users, accounts, applications, referrals)

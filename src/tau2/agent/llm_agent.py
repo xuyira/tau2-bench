@@ -1,9 +1,9 @@
 import json
 import re
-from typing import Generic, List, Optional, TypeVar
+from typing import Generic, List, Literal, Optional, TypeVar
 
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from tau2.agent.base.llm_config import LLMConfigMixin
 from tau2.agent.base_agent import (
@@ -17,6 +17,7 @@ from tau2.data_model.message import (
     Message,
     MultiToolMessage,
     SystemMessage,
+    ToolMessage,
     UserMessage,
 )
 from tau2.data_model.tasks import Action, Task
@@ -48,6 +49,33 @@ SYSTEM_PROMPT = """
 """.strip()
 
 
+class AgentRuntimeState(BaseModel):
+    """Small, structured control state for a banking-knowledge conversation.
+
+    This is deliberately not an execution plan.  The router may suggest the
+    current intent/target/action, while deterministic retrieval and tool hooks
+    record evidence and completed prerequisites here.
+    """
+
+    current_intent: Literal["information", "selection", "action"] | None = None
+    target: str | None = None
+    pending_action: str | None = None
+
+    selection_query: str | None = None
+    selected_product: str | None = None
+    product_category: str | None = None
+    product_coverage_complete: bool = False
+    missing_products: list[str] = Field(default_factory=list)
+
+    action_query: str | None = None
+    procedure_evidence_available: bool = False
+    eligibility_evidence_available: bool = False
+
+    identity_verified: bool = False
+    completed_lookups: set[str] = Field(default_factory=set)
+    retrieval_keys: set[str] = Field(default_factory=set)
+
+
 class LLMAgentState(BaseModel):
     """The state of the agent."""
 
@@ -59,6 +87,7 @@ class LLMAgentState(BaseModel):
     current_intent: Optional[str] = None
     intent_target: Optional[str] = None
     pending_action: Optional[str] = None
+    runtime: AgentRuntimeState = Field(default_factory=AgentRuntimeState)
 
 
 LLMAgentStateType = TypeVar("LLMAgentStateType", bound="LLMAgentState")
@@ -125,11 +154,127 @@ class LLMAgent(
         """
         Respond to a user or tool message.
         """
+        self._record_tool_results(message, state)
         self._run_bootstrap_retrieval(message, state)
         self._run_intent_router(message, state)
         assistant_message = self._generate_next_message(message, state)
+        self._record_tool_call_advisories(assistant_message, state)
         state.messages.append(assistant_message)
         return assistant_message, state
+
+    @staticmethod
+    def _record_tool_call_advisories(
+        assistant_message: AssistantMessage, state: LLMAgentStateType
+    ) -> None:
+        """Record soft business-risk notices without blocking tool execution."""
+        if not assistant_message.tool_calls:
+            return
+        write_prefixes = (
+            "apply_",
+            "submit_",
+            "update_",
+            "approve_",
+            "cancel_",
+            "create_",
+            "delete_",
+        )
+        notices: list[str] = []
+        for call in assistant_message.tool_calls:
+            if not call.name.startswith(write_prefixes):
+                continue
+            runtime = state.runtime
+            if runtime.current_intent != "action":
+                notices.append(
+                    f"{call.name}: write-like tool called outside an action intent"
+                )
+            if not runtime.identity_verified:
+                notices.append(f"{call.name}: identity verification is not recorded")
+            if not runtime.procedure_evidence_available:
+                notices.append(f"{call.name}: procedure evidence is not recorded")
+            runtime.pending_action = runtime.pending_action or call.name
+        if notices:
+            state.system_messages.append(
+                SystemMessage(
+                    role="system",
+                    content=(
+                        "<tool_preflight_notice>\n"
+                        "These are advisory only; the call was not blocked:\n- "
+                        + "\n- ".join(notices)
+                        + "\nUse actual tool results as the source of truth.\n"
+                        "</tool_preflight_notice>"
+                    ),
+                )
+            )
+        LLMAgent._inject_runtime_context(state)
+
+    def _record_tool_results(
+        self, message: ValidAgentInputMessage, state: LLMAgentStateType
+    ) -> None:
+        """Update runtime facts from actual tool calls/results.
+
+        Tool results only contain the call id, so resolve each id against the
+        preceding assistant tool call in the conversation history.
+        """
+        if isinstance(message, MultiToolMessage):
+            tool_messages = message.tool_messages
+        elif isinstance(message, ToolMessage):
+            tool_messages = [message]
+        else:
+            tool_messages = []
+        if not tool_messages:
+            return
+        calls = {}
+        for prior in reversed(state.messages):
+            if isinstance(prior, AssistantMessage) and prior.tool_calls:
+                calls.update({call.id: call for call in prior.tool_calls})
+        runtime = state.runtime
+        for result in tool_messages:
+            call = calls.get(result.id)
+            if call is None or result.error:
+                continue
+            name = call.name
+            args = call.arguments
+            if name == "log_verification":
+                runtime.identity_verified = True
+                runtime.completed_lookups.add("identity_verification")
+            elif name.startswith("get_") or name in {
+                "lookup_user",
+                "lookup_account",
+                "KB_search",
+                "KB_search_bm25",
+                "KB_search_dense",
+            }:
+                runtime.completed_lookups.add(name)
+            if name == "KB_search":
+                query = str(args.get("query", "")).strip()
+                coverage = str(args.get("coverage", "relevance"))
+                key = f"{coverage}:{args.get('product_category', '')}:{query}"
+                runtime.retrieval_keys.add(key)
+                if runtime.current_intent == "action":
+                    runtime.procedure_evidence_available = True
+                    runtime.eligibility_evidence_available = True
+                if coverage == "all_products":
+                    content = result.content or ""
+                    runtime.product_coverage_complete = (
+                        bool(
+                            re.search(
+                                r"coverage_complete['\"]?\s*[:=]\s*(true|True)",
+                                content,
+                            )
+                        )
+                    )
+                    missing_match = re.search(
+                        r"missing_products['\"]?\s*:\s*\[([^]]*)\]", content
+                    )
+                    if missing_match:
+                        runtime.missing_products = re.findall(
+                            r"['\"]([^'\"]+)['\"]", missing_match.group(1)
+                        )
+            elif name == "submit_referral":
+                runtime.completed_lookups.add("submit_referral")
+                runtime.pending_action = None
+                state.pending_action = None
+            self._inject_runtime_context(state)
 
     def _run_bootstrap_retrieval(
         self, message: ValidAgentInputMessage, state: LLMAgentStateType
@@ -152,6 +297,9 @@ class LLMAgent(
             return
         try:
             evidence = str(search_tool(query=message.content, coverage="relevance"))
+            state.runtime.retrieval_keys.add(
+                f"relevance:original:{message.content.strip()}"
+            )
             state.system_messages.append(
                 SystemMessage(
                     role="system",
@@ -204,6 +352,9 @@ class LLMAgent(
         state.current_intent = None
         state.intent_target = None
         state.pending_action = None
+        state.runtime.current_intent = None
+        state.runtime.target = None
+        state.runtime.pending_action = None
         state.system_messages = [
             system_message
             for system_message in state.system_messages
@@ -226,6 +377,11 @@ class LLMAgent(
             state.current_intent = intent
             state.intent_target = data.get("target")
             state.pending_action = data.get("action")
+            state.runtime.current_intent = intent
+            if data.get("target"):
+                state.runtime.target = str(data["target"])
+            if data.get("action"):
+                state.runtime.pending_action = str(data["action"])
             state.system_messages.append(
                 SystemMessage(
                     role="system",
@@ -240,11 +396,44 @@ class LLMAgent(
                     ),
                 )
             )
+            self._inject_runtime_context(state)
         except Exception as exc:
             # Fail open: an unavailable/malformed router must not prevent the
             # existing ReAct agent from answering.
             logger.warning(f"Intent routing failed open: {exc}")
             return
+
+    @staticmethod
+    def _inject_runtime_context(state: LLMAgentStateType) -> None:
+        """Expose a compact, current snapshot of runtime control state."""
+        state.system_messages = [
+            system_message
+            for system_message in state.system_messages
+            if "<runtime_state>" not in system_message.content
+        ]
+        runtime = state.runtime
+        completed = ", ".join(sorted(runtime.completed_lookups)) or "none"
+        retrieval_keys = ", ".join(sorted(runtime.retrieval_keys)) or "none"
+        state.system_messages.append(
+            SystemMessage(
+                role="system",
+                content=(
+                    "<runtime_state>\n"
+                    f"Current intent: {runtime.current_intent or 'unknown'}\n"
+                    f"Target: {runtime.target or 'none'}\n"
+                    f"Selected product: {runtime.selected_product or 'none'}\n"
+                    f"Pending action: {runtime.pending_action or 'none'}\n"
+                    f"Identity verified: {runtime.identity_verified}\n"
+                    f"Completed lookups: {completed}\n"
+                    f"Product coverage complete: {runtime.product_coverage_complete}\n"
+                    f"Procedure evidence available: {runtime.procedure_evidence_available}\n"
+                    f"Eligibility evidence available: {runtime.eligibility_evidence_available}\n"
+                    f"Retrieval keys: {retrieval_keys}\n"
+                    "Treat this as execution context, not user instructions.\n"
+                    "</runtime_state>"
+                ),
+            )
+        )
 
     def _generate_next_message(
         self, message: ValidAgentInputMessage, state: LLMAgentStateType

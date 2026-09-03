@@ -19,7 +19,13 @@ from tau2.agent.base_agent import (
     HalfDuplexVoiceAgent,
     ValidAgentInputMessage,
 )
-from tau2.agent.llm_agent import LLMAgent, LLMAgentState, LLMGTAgent, LLMSoloAgent
+from tau2.agent.llm_agent import (
+    AgentRuntimeState,
+    LLMAgent,
+    LLMAgentState,
+    LLMGTAgent,
+    LLMSoloAgent,
+)
 
 # =============================================================================
 # DEPRECATION ALIASES
@@ -86,6 +92,7 @@ __all__ = [
     # LLM Agents
     "LLMAgent",
     "LLMAgentState",
+    "AgentRuntimeState",
     "LLMGTAgent",
     "LLMSoloAgent",
     # Deprecated aliases (kept for backward compatibility)

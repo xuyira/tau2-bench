@@ -11,7 +11,11 @@ _PRODUCT_NAMESPACES = {
     "credit_cards": "credit_card",
     "business_credit_cards": "business_credit_card",
 }
-_SERVICE_PREFIXES = ("buy_now_pay_later", "everyone_pay", "personal_subscriptions")
+_SERVICE_PREFIXES = (
+    "buy_now_pay_later",
+    "everyone_pay",
+    "personal_subscriptions",
+)
 _TOPIC_PREFIXES = ("bank_accounts", "customer_support")
 
 
@@ -23,7 +27,11 @@ def normalize_document_id(document_id: str) -> str:
 
 
 def build_document_metadata(document_id: str) -> Dict[str, Any]:
-    """Parse conservative, ID-derived metadata for a knowledge document."""
+    """Parse conservative, ID-derived metadata for a knowledge document.
+
+    Values are intentionally limited to facts represented by the ID. In
+    particular, the absence of ``business`` does not imply a personal segment.
+    """
     raw_id = str(document_id)
     without_prefix = re.sub(r"^doc_", "", raw_id)
     index_match = re.search(r"_(\d+)$", without_prefix)
@@ -47,21 +55,30 @@ def build_document_metadata(document_id: str) -> Dict[str, Any]:
                 product_name_candidate = suffix.replace("_", " ")
             break
     else:
-        service_category_candidate = next(
-            (prefix for prefix in _SERVICE_PREFIXES
-             if stem == prefix or stem.startswith(f"{prefix}_")), None
+        service_prefix = next(
+            (
+                prefix
+                for prefix in _SERVICE_PREFIXES
+                if stem == prefix or stem.startswith(f"{prefix}_")
+            ),
+            None,
         )
-        if service_category_candidate:
+        topic_prefix = None
+        if service_prefix:
             resource_type = "service"
-            service_category = service_category_candidate
+            service_category = service_prefix
         else:
-            topic_category_candidate = next(
-                (prefix for prefix in _TOPIC_PREFIXES
-                 if stem == prefix or stem.startswith(f"{prefix}_")), None
+            topic_prefix = next(
+                (
+                    prefix
+                    for prefix in _TOPIC_PREFIXES
+                    if stem == prefix or stem.startswith(f"{prefix}_")
+                ),
+                None,
             )
-            if topic_category_candidate:
-                resource_type = "topic"
-                topic_category = topic_category_candidate
+        if resource_type == "unknown" and topic_prefix:
+            resource_type = "topic"
+            topic_category = topic_prefix
 
     return {
         "document_id": raw_id,
@@ -81,9 +98,14 @@ def build_document_search_text(
     document: Dict[str, Any], content_field: str = "text"
 ) -> str:
     """Combine a normalized document ID, title, and content for retrieval."""
-    content = document.get(content_field) or document.get("content") or document.get("text")
+    content = (
+        document.get(content_field) or document.get("content") or document.get("text")
+    )
     if content is None:
-        raise ValueError(f"Document {document.get('id', 'unknown')} missing content field")
+        raise ValueError(
+            f"Document {document.get('id', 'unknown')} missing content field"
+        )
+
     metadata = build_document_metadata(str(document.get("id", "")))
     normalized_id = str(document.get("normalized_id", metadata["normalized_id"]))
     title = str(document.get("title", ""))

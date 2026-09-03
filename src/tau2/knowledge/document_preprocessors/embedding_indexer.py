@@ -6,6 +6,7 @@ from tau2.knowledge.document_preprocessors.base import (
     BaseDocumentPreprocessor,
 )
 from tau2.knowledge.embedders import (
+    BailianEmbedder,
     OpenAIEmbedder,
     OpenRouterEmbedder,
 )
@@ -13,6 +14,7 @@ from tau2.knowledge.embeddings_cache import get_embeddings_cache
 from tau2.knowledge.registry import register_document_preprocessor
 
 EMBEDDER_REGISTRY = {
+    "bailian": BailianEmbedder,
     "openai": OpenAIEmbedder,
     "openrouter": OpenRouterEmbedder,
 }

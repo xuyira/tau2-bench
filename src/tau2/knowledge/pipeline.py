@@ -40,6 +40,7 @@ class RetrievalTiming:
 class RetrievalResult:
     results: List[Tuple[str, float]]
     timing: RetrievalTiming
+    coverage: Optional[Dict[str, Any]] = None
 
 
 class RetrievalPipeline:
@@ -93,20 +94,26 @@ class RetrievalPipeline:
         if not documents:
             raise ValueError("Documents list is empty.")
 
+        # Keep metadata keyed by the original document IDs so chunking does not
+        # change the product/category inventory exposed to callers.
+        original_documents = list(documents)
         document_metadata = {
-            doc["id"]: build_document_metadata(str(doc["id"])) for doc in documents
+            doc["id"]: build_document_metadata(str(doc["id"]))
+            for doc in original_documents
         }
         metadata_catalog: Dict[str, Dict[str, List[str]]] = {}
         for doc_id, metadata in document_metadata.items():
             if metadata["resource_type"] != "product":
                 continue
+            category = str(metadata["product_category"])
             product_name = str(metadata["product_name_candidate"])
             if product_name == "unknown":
                 continue
-            category = str(metadata["product_category"])
+            product_name = product_name.title()
             metadata_catalog.setdefault(category, {}).setdefault(
-                product_name.title(), []
+                product_name, []
             ).append(doc_id)
+
         self.state["document_metadata"] = document_metadata
         self.state["metadata_catalog"] = metadata_catalog
 
@@ -123,9 +130,17 @@ class RetrievalPipeline:
             title = doc.get("title", doc_id)
             self.state["doc_content_map"][doc_id] = content
             self.state["doc_title_map"][doc_id] = title
+        self.state["doc_content_map"].update(
+            self.state.get("parent_doc_content_map", {})
+        )
+        self.state["doc_title_map"].update(self.state.get("parent_doc_title_map", {}))
 
     def retrieve(
-        self, query: str, top_k: int = None, return_timing: bool = False
+        self,
+        query: str,
+        top_k: int = None,
+        return_timing: bool = False,
+        retrieval_scope: Optional[Dict[str, Any]] = None,
     ) -> List[Tuple[str, float]] | RetrievalResult:
         if "documents" not in self.state:
             raise ValueError("No documents indexed. Call index_documents() first.")
@@ -133,6 +148,9 @@ class RetrievalPipeline:
         timing = RetrievalTiming()
 
         input_data: Dict[str, Any] = {"query": query}
+        scope = self._resolve_product_scope(retrieval_scope)
+        if retrieval_scope:
+            input_data["retrieval_scope"] = retrieval_scope
         if "kb_search_inputs" in self.state:
             input_data.update(self.state["kb_search_inputs"])
 
@@ -141,12 +159,28 @@ class RetrievalPipeline:
             input_data = preprocessor.process(input_data, self.state)
         timing.input_preprocessing_ms = (time.perf_counter() - preprocess_start) * 1000
 
-        original_retriever_top_ks = []
+        original_retriever_limits = []
         if self._retriever_top_k_override is not None:
             for retriever in self.retrievers:
                 if hasattr(retriever, "top_k"):
-                    original_retriever_top_ks.append((retriever, retriever.top_k))
+                    original_retriever_limits.append(
+                        (retriever, "top_k", retriever.top_k)
+                    )
                     retriever.top_k = self._retriever_top_k_override
+        if scope is not None:
+            corpus_size = len(self.state["documents"])
+            for retriever in self.retrievers:
+                for attribute in ("top_k", "candidate_top_k"):
+                    if not hasattr(retriever, attribute):
+                        continue
+                    if not any(
+                        item[0] is retriever and item[1] == attribute
+                        for item in original_retriever_limits
+                    ):
+                        original_retriever_limits.append(
+                            (retriever, attribute, getattr(retriever, attribute))
+                        )
+                    setattr(retriever, attribute, corpus_size)
 
         retrieval_start = time.perf_counter()
         all_results: Dict[str, float] = {}
@@ -157,10 +191,18 @@ class RetrievalPipeline:
                     all_results[doc_id] = score
         timing.retrieval_ms = (time.perf_counter() - retrieval_start) * 1000
 
-        for retriever, orig_top_k in original_retriever_top_ks:
-            retriever.top_k = orig_top_k
+        for retriever, attribute, original_value in original_retriever_limits:
+            setattr(retriever, attribute, original_value)
 
         results = sorted(all_results.items(), key=lambda x: x[1], reverse=True)
+        if scope is not None:
+            allowed_document_ids = scope["allowed_document_ids"]
+            parent_map = self.state.get("chunk_parent_map", {})
+            results = [
+                (doc_id, score)
+                for doc_id, score in results
+                if parent_map.get(doc_id, doc_id) in allowed_document_ids
+            ]
         if top_k is not None:
             results = results[:top_k]
 
@@ -172,6 +214,16 @@ class RetrievalPipeline:
                         (postprocessor, postprocessor.top_k)
                     )
                     postprocessor.top_k = self._postprocessor_top_k_override
+        if scope is not None and scope["coverage"] == "all_products":
+            scoped_limit = max(1, len(scope["allowed_document_ids"]))
+            for postprocessor in self.postprocessors:
+                if hasattr(postprocessor, "top_k") and not any(
+                    item[0] is postprocessor for item in original_postprocessor_top_ks
+                ):
+                    original_postprocessor_top_ks.append(
+                        (postprocessor, postprocessor.top_k)
+                    )
+                    postprocessor.top_k = scoped_limit
 
         postprocess_start = time.perf_counter()
         for postprocessor in self.postprocessors:
@@ -186,9 +238,94 @@ class RetrievalPipeline:
         for postprocessor, orig_top_k in original_postprocessor_top_ks:
             postprocessor.top_k = orig_top_k
 
+        coverage = None
+        if scope is not None and scope["coverage"] == "all_products":
+            results, coverage = self._collapse_product_results(
+                results,
+                scope,
+                top_k=top_k or 10,
+            )
+
         if return_timing:
-            return RetrievalResult(results=results, timing=timing)
+            return RetrievalResult(results=results, timing=timing, coverage=coverage)
         return results
+
+    def _resolve_product_scope(
+        self, retrieval_scope: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve a requested product scope against the runtime catalog."""
+        if not retrieval_scope:
+            return None
+        category = retrieval_scope.get("product_category")
+        product_names = retrieval_scope.get("product_names")
+        if not category and not product_names:
+            return None
+        if not category:
+            raise ValueError("product_category is required with product_names")
+
+        category_catalog = self.get_metadata_catalog().get(category)
+        if category_catalog is None:
+            raise ValueError(f"Unknown product category: {category}")
+        requested_products = list(product_names or sorted(category_catalog))
+        unknown_products = [
+            product for product in requested_products if product not in category_catalog
+        ]
+        if unknown_products:
+            raise ValueError(
+                f"Unknown products for {category}: {', '.join(unknown_products)}"
+            )
+        allowed_document_ids = {
+            doc_id
+            for product in requested_products
+            for doc_id in category_catalog[product]
+        }
+        document_products = {
+            doc_id: product
+            for product in requested_products
+            for doc_id in category_catalog[product]
+        }
+        return {
+            "product_category": category,
+            "coverage": retrieval_scope.get("coverage", "relevance"),
+            "requested_products": requested_products,
+            "allowed_document_ids": allowed_document_ids,
+            "document_products": document_products,
+        }
+
+    def _collapse_product_results(
+        self,
+        results: List[Tuple[str, float]],
+        scope: Dict[str, Any],
+        top_k: int,
+    ) -> Tuple[List[Tuple[str, float]], Dict[str, Any]]:
+        """Keep the best complete parent document per product and report coverage."""
+        parent_map = self.state.get("chunk_parent_map", {})
+        best_by_product: Dict[str, Tuple[str, float]] = {}
+        for doc_id, score in results:
+            parent_id = parent_map.get(doc_id, doc_id)
+            product = scope["document_products"].get(parent_id)
+            if product is not None and product not in best_by_product:
+                best_by_product[product] = (parent_id, score)
+        collapsed = list(best_by_product.values())[:top_k]
+        returned_ids = {doc_id for doc_id, _ in collapsed}
+        covered_products = [
+            product
+            for product in scope["requested_products"]
+            if best_by_product.get(product, (None,))[0] in returned_ids
+        ]
+        missing_products = [
+            product
+            for product in scope["requested_products"]
+            if product not in covered_products
+        ]
+        coverage = {
+            "product_category": scope["product_category"],
+            "requested_products": scope["requested_products"],
+            "covered_products": covered_products,
+            "missing_products": missing_products,
+            "coverage_complete": not missing_products,
+        }
+        return collapsed, coverage
 
     def retrieve_batch(
         self, queries: List[str], top_k: int = None
@@ -266,7 +403,12 @@ class RetrievalPipeline:
     def apply_product_catalog_review(
         self, review: Dict[str, Dict[str, List[str]]]
     ) -> None:
-        """Validate and filter ID-derived product candidates using a review catalog."""
+        """Validate and filter ID-derived product candidates using a review catalog.
+
+        The review records names only. Document IDs remain derived from the
+        currently indexed knowledge base, so reindexing always refreshes the
+        documents associated with each confirmed product.
+        """
         candidates = self.get_metadata_catalog()
         candidate_categories = set(candidates)
         reviewed_categories = set(review)
@@ -292,6 +434,7 @@ class RetrievalPipeline:
                     f"Duplicate product catalog review names for {category}: "
                     f"{duplicate_names}"
                 )
+
             candidate_names = set(candidate_products)
             reviewed_name_set = set(reviewed_names)
             if candidate_names != reviewed_name_set:
@@ -304,6 +447,7 @@ class RetrievalPipeline:
             confirmed_catalog[category] = {
                 name: candidate_products[name] for name in confirmed
             }
+
         self.state["metadata_catalog_candidates"] = candidates
         self.state["metadata_catalog"] = confirmed_catalog
 

@@ -546,8 +546,15 @@ def warm_kb_cache(
         print(f"✅ Loaded {len(docs)} documents")
 
     if embedder_configs:
+        from tau2.knowledge.document_preprocessors.search_text import (
+            build_document_search_text,
+        )
+
+        embedding_docs = [
+            {"id": doc["id"], "text": build_document_search_text(doc)} for doc in docs
+        ]
         for embedder_type, embedder_params in embedder_configs:
-            cached = cache.get(docs, embedder_type, embedder_params)
+            cached = cache.get(embedding_docs, embedder_type, embedder_params)
             if cached is not None:
                 print(
                     f"✅ Embeddings already cached for {embedder_type}:{embedder_params.get('model', 'default')}"
@@ -557,7 +564,7 @@ def warm_kb_cache(
                     f"🔄 Computing embeddings for {embedder_type}:{embedder_params.get('model', 'default')}..."
                 )
                 _compute_and_cache_embeddings(
-                    docs, embedder_type, embedder_params, cache
+                    embedding_docs, embedder_type, embedder_params, cache
                 )
 
     return docs
@@ -571,11 +578,13 @@ def _compute_and_cache_embeddings(
 ) -> np.ndarray:
     """Compute embeddings and cache them."""
     from tau2.knowledge.embedders import (
+        BailianEmbedder,
         OpenAIEmbedder,
         OpenRouterEmbedder,
     )
 
     EMBEDDER_REGISTRY = {
+        "bailian": BailianEmbedder,
         "openai": OpenAIEmbedder,
         "openrouter": OpenRouterEmbedder,
     }
@@ -621,8 +630,22 @@ def get_unique_embedder_configs_for_retrieval_configs(
         ),
         "openai_embeddings": ("openai", {"model": "text-embedding-3-large"}),
         "openai_embeddings_reranker": ("openai", {"model": "text-embedding-3-large"}),
-        "alltools": ("openai", {"model": "text-embedding-3-large"}),
-        "AllTools": ("openai", {"model": "text-embedding-3-large"}),
+        "alltools": ("bailian", {"model": "qwen3.7-text-embedding"}),
+        "hybrid_rrf": ("bailian", {"model": "qwen3.7-text-embedding"}),
+        "hybrid_rrf_cross_encoder": (
+            "bailian",
+            {"model": "qwen3.7-text-embedding"},
+        ),
+        "hybrid_rrf_bge": ("bailian", {"model": "qwen3.7-text-embedding"}),
+        "hybrid_rrf_smart_chunks": (
+            "bailian",
+            {"model": "qwen3.7-text-embedding"},
+        ),
+        "hybrid_rrf_parent_first_chunks": (
+            "bailian",
+            {"model": "qwen3.7-text-embedding"},
+        ),
+        "AllTools": ("bailian", {"model": "qwen3.7-text-embedding"}),
         "alltools-qwen": ("openrouter", {"model": "qwen3-embedding-8b"}),
     }
 

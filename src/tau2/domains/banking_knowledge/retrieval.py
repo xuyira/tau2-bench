@@ -60,6 +60,7 @@ DEFAULT_RETRIEVAL_VARIANT = "alltools"
 
 DEFAULT_DENSE_EMBEDDING_MODEL_OPENAI = "text-embedding-3-large"
 DEFAULT_DENSE_EMBEDDING_MODEL_OPENROUTER = "qwen3-embedding-8b"
+DEFAULT_DENSE_EMBEDDING_MODEL_BAILIAN = "qwen3.7-text-embedding"
 
 
 def format_all_tools_dense_instructions(variant: "RetrievalVariant") -> str:
@@ -69,7 +70,10 @@ def format_all_tools_dense_instructions(variant: "RetrievalVariant") -> str:
 
     embedder_type = variant.kb_search_dense.embedder_type
     model = variant.kb_search_dense.embedder_model
-    if embedder_type == "openai":
+    if embedder_type == "bailian":
+        provider = "Alibaba Cloud Model Studio (Bailian)"
+        model = model or DEFAULT_DENSE_EMBEDDING_MODEL_BAILIAN
+    elif embedder_type == "openai":
         provider = "OpenAI API"
         model = model or DEFAULT_DENSE_EMBEDDING_MODEL_OPENAI
     elif embedder_type == "openrouter":
@@ -235,6 +239,79 @@ def create_bm25_retrieval_pipeline(
     return pipeline
 
 
+def create_hybrid_rrf_retrieval_pipeline(
+    knowledge_base: KnowledgeBase,
+    embedder_type: str,
+    embedder_params: Dict[str, Any],
+    top_k: int = 10,
+    candidate_top_k: int = 50,
+    rrf_k: int = 60,
+    bm25_weight: float = 1.0,
+    dense_weight: float = 1.0,
+    postprocessors: Optional[List[Dict[str, Any]]] = None,
+    semantic_chunking: bool = False,
+    chunk_max_chars: int = 2000,
+    parent_first_chunk_reranker: bool = False,
+) -> "RetrievalPipeline":
+    """Create a BM25 + dense retrieval pipeline fused with weighted RRF."""
+    from tau2.knowledge.pipeline import RetrievalPipeline
+
+    document_preprocessors = []
+    if semantic_chunking:
+        document_preprocessors.append(
+            {
+                "type": "markdown_semantic_chunker",
+                "params": {"max_chars": chunk_max_chars},
+            }
+        )
+    document_preprocessors.extend(
+        [
+            {"type": "bm25_indexer", "params": {"state_key": "bm25"}},
+            {
+                "type": "embedding_indexer",
+                "params": {
+                    "embedder_type": embedder_type,
+                    "embedder_params": embedder_params,
+                    "state_key": "doc_embeddings",
+                },
+            },
+        ]
+    )
+    config = {
+        "document_preprocessors": document_preprocessors,
+        "input_preprocessors": [
+            {
+                "type": "embedding_encoder",
+                "params": {
+                    "embedder_type": embedder_type,
+                    "embedder_params": embedder_params,
+                    "input_key": "query",
+                    "output_key": "query_embedding",
+                },
+            }
+        ],
+        "retriever": {
+            "type": "bm25_dense_rrf",
+            "params": {
+                "candidate_top_k": candidate_top_k,
+                "top_k": (
+                    candidate_top_k
+                    if semantic_chunking or parent_first_chunk_reranker
+                    else top_k
+                ),
+                "rrf_k": rrf_k,
+                "bm25_weight": bm25_weight,
+                "dense_weight": dense_weight,
+            },
+        },
+        "postprocessors": postprocessors or [],
+    }
+
+    pipeline = RetrievalPipeline(config)
+    pipeline.index_documents(get_or_create_docs(knowledge_base))
+    return pipeline
+
+
 def create_grep_retrieval_pipeline(
     knowledge_base: KnowledgeBase,
     top_k: int = 10,
@@ -298,12 +375,23 @@ PromptBuilder = Callable[[Path, KnowledgeBase, Optional["Task"]], str]
 class PipelineSpec:
     """Specification for a KB_search pipeline."""
 
-    type: Literal["embedding", "bm25"]
+    type: Literal["embedding", "bm25", "hybrid_rrf"]
     embedder_type: Optional[str] = None  # e.g. "openrouter"
     embedder_model: Optional[str] = None  # e.g. "qwen3-embedding-8b"
     top_k: int = 10
     reranker: bool = False
     reranker_min_score: int = 5
+    candidate_top_k: int = 50
+    rrf_k: int = 60
+    bm25_weight: float = 1.0
+    dense_weight: float = 1.0
+    cross_encoder_reranker: bool = False
+    cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    cross_encoder_batch_size: int = 8
+    cross_encoder_max_length: int = 512
+    semantic_chunking: bool = False
+    chunk_max_chars: int = 2000
+    parent_first_chunk_reranker: bool = False
 
 
 @dataclass
@@ -566,6 +654,73 @@ RETRIEVAL_VARIANTS: Dict[str, RetrievalVariant] = {
         kb_search=PipelineSpec(type="bm25"),
         supports_top_k=True,
     ),
+    "hybrid_rrf": RetrievalVariant(
+        name="hybrid_rrf",
+        prompt_template=PROMPTS_DIR / "hybrid_rrf.md",
+        build_prompt=standard_prompt,
+        kb_search=PipelineSpec(
+            type="hybrid_rrf",
+            embedder_type="bailian",
+            embedder_model=DEFAULT_DENSE_EMBEDDING_MODEL_BAILIAN,
+        ),
+        supports_top_k=True,
+    ),
+    "hybrid_rrf_cross_encoder": RetrievalVariant(
+        name="hybrid_rrf_cross_encoder",
+        prompt_template=PROMPTS_DIR / "hybrid_rrf.md",
+        build_prompt=standard_prompt,
+        kb_search=PipelineSpec(
+            type="hybrid_rrf",
+            embedder_type="bailian",
+            embedder_model=DEFAULT_DENSE_EMBEDDING_MODEL_BAILIAN,
+            cross_encoder_reranker=True,
+        ),
+        supports_top_k=True,
+    ),
+    "hybrid_rrf_bge": RetrievalVariant(
+        name="hybrid_rrf_bge",
+        prompt_template=PROMPTS_DIR / "hybrid_rrf.md",
+        build_prompt=standard_prompt,
+        kb_search=PipelineSpec(
+            type="hybrid_rrf",
+            embedder_type="bailian",
+            embedder_model=DEFAULT_DENSE_EMBEDDING_MODEL_BAILIAN,
+            cross_encoder_reranker=True,
+            cross_encoder_model="BAAI/bge-reranker-v2-m3",
+            cross_encoder_batch_size=1,
+            cross_encoder_max_length=2048,
+        ),
+        supports_top_k=True,
+    ),
+    "hybrid_rrf_smart_chunks": RetrievalVariant(
+        name="hybrid_rrf_smart_chunks",
+        prompt_template=PROMPTS_DIR / "hybrid_rrf.md",
+        build_prompt=standard_prompt,
+        kb_search=PipelineSpec(
+            type="hybrid_rrf",
+            embedder_type="bailian",
+            embedder_model=DEFAULT_DENSE_EMBEDDING_MODEL_BAILIAN,
+            candidate_top_k=50,
+            cross_encoder_reranker=True,
+            semantic_chunking=True,
+            chunk_max_chars=2000,
+        ),
+        supports_top_k=True,
+    ),
+    "hybrid_rrf_parent_first_chunks": RetrievalVariant(
+        name="hybrid_rrf_parent_first_chunks",
+        prompt_template=PROMPTS_DIR / "hybrid_rrf.md",
+        build_prompt=standard_prompt,
+        kb_search=PipelineSpec(
+            type="hybrid_rrf",
+            embedder_type="bailian",
+            embedder_model=DEFAULT_DENSE_EMBEDDING_MODEL_BAILIAN,
+            candidate_top_k=50,
+            parent_first_chunk_reranker=True,
+            chunk_max_chars=2000,
+        ),
+        supports_top_k=True,
+    ),
     "bm25_reranker": RetrievalVariant(
         name="bm25_reranker",
         prompt_template=PROMPTS_DIR / "classic_rag_bm25_no_grep.md",
@@ -594,8 +749,8 @@ RETRIEVAL_VARIANTS: Dict[str, RetrievalVariant] = {
     ),
     "alltools": all_tools_variant(
         "alltools",
-        embedder_type="openai",
-        embedder_model=DEFAULT_DENSE_EMBEDDING_MODEL_OPENAI,
+        embedder_type="bailian",
+        embedder_model=DEFAULT_DENSE_EMBEDDING_MODEL_BAILIAN,
     ),
     "alltools-qwen": all_tools_variant(
         "alltools-qwen",
@@ -693,6 +848,8 @@ def _create_kb_pipeline(
     knowledge_base: KnowledgeBase,
 ) -> "RetrievalPipeline":
     """Build a KB_search pipeline from a ``PipelineSpec``."""
+    from tau2.domains.banking_knowledge.metadata import load_product_catalog_review
+
     postprocessors: Optional[List[Dict[str, Any]]] = None
     if spec.reranker:
         postprocessors = [
@@ -701,9 +858,43 @@ def _create_kb_pipeline(
                 "params": {"min_score": spec.reranker_min_score},
             }
         ]
+    elif spec.parent_first_chunk_reranker:
+        postprocessors = [
+            {
+                "type": "parent_first_chunk_reranker",
+                "params": {
+                    "model": spec.cross_encoder_model,
+                    "top_k": spec.top_k,
+                    "batch_size": spec.cross_encoder_batch_size,
+                    "max_length": spec.cross_encoder_max_length,
+                    "chunk_max_chars": spec.chunk_max_chars,
+                },
+            }
+        ]
+    elif spec.cross_encoder_reranker:
+        postprocessors = [
+            {
+                "type": "cross_encoder_reranker",
+                "params": {
+                    "model": spec.cross_encoder_model,
+                    "top_k": (
+                        spec.candidate_top_k if spec.semantic_chunking else spec.top_k
+                    ),
+                    "batch_size": spec.cross_encoder_batch_size,
+                    "max_length": spec.cross_encoder_max_length,
+                },
+            }
+        ]
+        if spec.semantic_chunking:
+            postprocessors.append(
+                {
+                    "type": "parent_document_collapse",
+                    "params": {"top_k": spec.top_k},
+                }
+            )
 
     if spec.type == "embedding":
-        return create_embedding_retrieval_pipeline(
+        pipeline = create_embedding_retrieval_pipeline(
             knowledge_base=knowledge_base,
             embedder_type=spec.embedder_type or "openrouter",
             embedder_params={"model": spec.embedder_model},
@@ -711,13 +902,37 @@ def _create_kb_pipeline(
             postprocessors=postprocessors,
         )
     elif spec.type == "bm25":
-        return create_bm25_retrieval_pipeline(
+        pipeline = create_bm25_retrieval_pipeline(
             knowledge_base=knowledge_base,
             top_k=spec.top_k,
             postprocessors=postprocessors,
         )
+    elif spec.type == "hybrid_rrf":
+        pipeline = create_hybrid_rrf_retrieval_pipeline(
+            knowledge_base=knowledge_base,
+            embedder_type=spec.embedder_type or "bailian",
+            embedder_params={"model": spec.embedder_model},
+            top_k=(
+                spec.candidate_top_k
+                if spec.cross_encoder_reranker or spec.parent_first_chunk_reranker
+                else spec.top_k
+            ),
+            candidate_top_k=spec.candidate_top_k,
+            rrf_k=spec.rrf_k,
+            bm25_weight=spec.bm25_weight,
+            dense_weight=spec.dense_weight,
+            postprocessors=postprocessors,
+            semantic_chunking=spec.semantic_chunking,
+            chunk_max_chars=spec.chunk_max_chars,
+            parent_first_chunk_reranker=spec.parent_first_chunk_reranker,
+        )
     else:
         raise ValueError(f"Unknown pipeline type: {spec.type!r}")
+    # The reviewed catalog applies to the full hybrid knowledge index. Classic
+    # BM25/grep fixtures may intentionally contain only a small document subset.
+    if spec.type == "hybrid_rrf":
+        pipeline.apply_product_catalog_review(load_product_catalog_review())
+    return pipeline
 
 
 def _create_grep_pipeline(

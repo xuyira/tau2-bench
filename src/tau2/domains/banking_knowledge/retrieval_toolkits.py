@@ -50,6 +50,10 @@ class KnowledgeToolsWithKBSearch(KBSearchMixin, KnowledgeTools):
         super().__init__(db)
         self._kb_pipeline = kb_pipeline
 
+    def get_metadata_catalog(self) -> dict:
+        """Return metadata derived from the currently indexed knowledge base."""
+        return self._kb_pipeline.get_metadata_catalog()
+
 
 class KnowledgeToolsWithGrep(GrepMixin, KnowledgeTools):
     """Base banking tools + grep.
@@ -78,6 +82,10 @@ class KnowledgeToolsWithKBSearchAndGrep(KBSearchMixin, GrepMixin, KnowledgeTools
         super().__init__(db)
         self._kb_pipeline = kb_pipeline
         self._grep_pipeline = grep_pipeline
+
+    def get_metadata_catalog(self) -> dict:
+        """Return metadata derived from the primary KB search index."""
+        return self._kb_pipeline.get_metadata_catalog()
 
 
 class KnowledgeToolsWithShell(ShellMixin, KnowledgeTools):
@@ -110,3 +118,7 @@ class KnowledgeToolsAllTools(
         self._kb_bm25_pipeline = kb_bm25_pipeline
         self._kb_dense_pipeline = kb_dense_pipeline
         self._sandbox = sandbox
+
+    def get_metadata_catalog(self) -> dict:
+        """Return metadata derived from the current BM25 knowledge index."""
+        return self._kb_bm25_pipeline.get_metadata_catalog()

@@ -1,6 +1,7 @@
 from typing import Any, Dict, List
 
 from tau2.knowledge.embedders import (
+    BailianEmbedder,
     OpenAIEmbedder,
     OpenRouterEmbedder,
 )
@@ -14,6 +15,7 @@ from tau2.knowledge.input_preprocessors.base import (
 from tau2.knowledge.registry import register_input_preprocessor
 
 EMBEDDER_REGISTRY = {
+    "bailian": BailianEmbedder,
     "openai": OpenAIEmbedder,
     "openrouter": OpenRouterEmbedder,
 }

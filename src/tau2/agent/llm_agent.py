@@ -1,3 +1,5 @@
+import json
+import re
 from typing import Generic, List, Optional, TypeVar
 
 from loguru import logger
@@ -51,6 +53,12 @@ class LLMAgentState(BaseModel):
 
     system_messages: list[SystemMessage]
     messages: list[APICompatibleMessage]
+    # Lightweight per-turn intent signal.  This is deliberately kept outside
+    # the conversation messages: the router's JSON response is control data,
+    # not something the user or the ReAct history should see as a message.
+    current_intent: Optional[str] = None
+    intent_target: Optional[str] = None
+    pending_action: Optional[str] = None
 
 
 LLMAgentStateType = TypeVar("LLMAgentStateType", bound="LLMAgentState")
@@ -118,6 +126,7 @@ class LLMAgent(
         Respond to a user or tool message.
         """
         self._run_bootstrap_retrieval(message, state)
+        self._run_intent_router(message, state)
         assistant_message = self._generate_next_message(message, state)
         state.messages.append(assistant_message)
         return assistant_message, state
@@ -160,6 +169,82 @@ class LLMAgent(
             logger.warning(f"Bootstrap relevance retrieval failed open: {exc}")
         finally:
             self._bootstrap_retrieval_done = True
+
+    def _run_intent_router(
+        self, message: ValidAgentInputMessage, state: LLMAgentStateType
+    ) -> None:
+        """Classify each new user turn as information, selection, or action.
+
+        The router is intentionally small and has no tools.  Its output is
+        control metadata used to choose retrieval; the normal ReAct call still
+        decides which tools to execute.  Non-banking agents are left untouched.
+        """
+        if not isinstance(message, UserMessage) or not _is_banking_knowledge_agent(
+            self.tools
+        ):
+            return
+        router_prompt = SystemMessage(
+            role="system",
+            content=(
+                "Classify the user's latest request into exactly one intent: "
+                "information, selection, or action. Return JSON only with keys "
+                "intent, target, action. Use null when target or action is absent. "
+                "information asks for facts, explanation, investigation, or status; "
+                "selection compares or chooses products/options; action asks to "
+                "apply, submit, change, update, cancel, approve, or otherwise "
+                "perform an operation. Do not infer a fourth transition category."
+            ),
+        )
+        # A short tail provides enough conversational context without sending
+        # the full (and potentially tool-heavy) trajectory to this extra call.
+        context = state.messages[-8:]
+        router_messages: list[Message] = [router_prompt, *context, message]
+        # Clear the previous turn's signal before classifying.  If this call
+        # fails open, stale intent data must not steer the next ReAct decision.
+        state.current_intent = None
+        state.intent_target = None
+        state.pending_action = None
+        state.system_messages = [
+            system_message
+            for system_message in state.system_messages
+            if "<intent_context>" not in system_message.content
+        ]
+        try:
+            result = generate(
+                model=self.llm,
+                messages=router_messages,
+                tools=None,
+                call_name="intent_router",
+                **self.llm_args,
+            )
+            raw = (result.content or "").strip()
+            match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+            data = json.loads(match.group(0) if match else raw)
+            intent = data.get("intent")
+            if intent not in {"information", "selection", "action"}:
+                raise ValueError(f"invalid intent: {intent!r}")
+            state.current_intent = intent
+            state.intent_target = data.get("target")
+            state.pending_action = data.get("action")
+            state.system_messages.append(
+                SystemMessage(
+                    role="system",
+                    content=(
+                        "<intent_context>\n"
+                        f"Current user intent: {intent}\n"
+                        f"Target: {state.intent_target or 'none'}\n"
+                        f"Requested action: {state.pending_action or 'none'}\n"
+                        "Use this as routing context; independently verify details "
+                        "from the conversation and retrieved evidence.\n"
+                        "</intent_context>"
+                    ),
+                )
+            )
+        except Exception as exc:
+            # Fail open: an unavailable/malformed router must not prevent the
+            # existing ReAct agent from answering.
+            logger.warning(f"Intent routing failed open: {exc}")
+            return
 
     def _generate_next_message(
         self, message: ValidAgentInputMessage, state: LLMAgentStateType

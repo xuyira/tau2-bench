@@ -70,6 +70,82 @@ def _run_kb_search(
     return _format_kb_search_result(pipeline, retrieval_result)
 
 
+def _run_all_products_search(pipeline, query: str, product_category: str,
+                             product_names: Optional[list[str]] = None,
+                             max_attempts: int = 3) -> str:
+    """Run product coverage search and repair missing products automatically.
+
+    The first pass uses the caller's category-level query. Subsequent passes are
+    restricted to the complete list reported as missing by the pipeline. This is
+    intentionally deterministic and keeps the normal relevance path unchanged.
+    """
+    requested = list(product_names) if product_names else None
+    original_requested: Optional[list[str]] = None
+    seen_docs: set[str] = set()
+    merged: list[tuple[str, float]] = []
+    covered: list[str] = []
+    last_missing: list[str] = []
+    total_timing = None
+    search_query = query
+
+    for attempt in range(max_attempts):
+        scope = {
+            "product_category": product_category,
+            "product_names": requested,
+            "coverage": "all_products",
+        }
+        result = pipeline.retrieve(search_query, return_timing=True,
+                                   retrieval_scope=scope)
+        if total_timing is None:
+            total_timing = result.timing
+        else:
+            total_timing.input_preprocessing_ms += result.timing.input_preprocessing_ms
+            total_timing.retrieval_ms += result.timing.retrieval_ms
+            total_timing.postprocessing_ms += result.timing.postprocessing_ms
+            for name, value in result.timing.postprocessor_details.items():
+                total_timing.postprocessor_details[name] = (
+                    total_timing.postprocessor_details.get(name, 0.0) + value
+                )
+        coverage = result.coverage or {}
+        if original_requested is None:
+            original_requested = list(coverage.get("requested_products", requested or []))
+        for product in coverage.get("covered_products", []):
+            if product not in covered:
+                covered.append(product)
+        for doc_id, score in result.results:
+            if doc_id not in seen_docs:
+                seen_docs.add(doc_id)
+                merged.append((doc_id, score))
+        last_missing = [p for p in (original_requested or []) if p not in covered]
+        if not last_missing:
+            break
+        if attempt + 1 >= max_attempts:
+            break
+        # A scoped retry is useful only if it targets a smaller/new set.
+        if requested is not None and set(last_missing) == set(requested):
+            search_query = f"{query} Products: {', '.join(last_missing)} Complete product documentation"
+        requested = last_missing
+
+    if total_timing is None:
+        return "No relevant documents found."
+    final_coverage = {
+        "product_category": product_category,
+        "requested_products": original_requested or [],
+        "covered_products": covered,
+        "missing_products": last_missing,
+        "coverage_complete": not last_missing,
+    }
+    # Reuse the normal formatter with a lightweight result carrying merged output.
+    return _format_kb_search_result(
+        pipeline,
+        type("_CoverageResult", (), {
+            "results": merged,
+            "timing": total_timing,
+            "coverage": final_coverage,
+        })(),
+    )
+
+
 class KBSearchMixin(metaclass=ToolKitType):
     """MixIn that provides the KB_search tool.
 
@@ -105,6 +181,13 @@ class KBSearchMixin(metaclass=ToolKitType):
             )
         if product_names and not product_category:
             raise ValueError("product_category is required with product_names")
+        if coverage == "all_products":
+            return _run_all_products_search(
+                self._kb_pipeline,
+                query,
+                product_category,
+                product_names,
+            )
         retrieval_scope = None
         if coverage == "all_products" or product_category or product_names:
             retrieval_scope = {

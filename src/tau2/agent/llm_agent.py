@@ -62,10 +62,14 @@ class AgentRuntimeState(BaseModel):
     pending_action: str | None = None
 
     selection_query: str | None = None
+    selection_objective: str | None = None
     selected_product: str | None = None
     product_category: str | None = None
     product_coverage_complete: bool = False
     missing_products: list[str] = Field(default_factory=list)
+    decision_evidence_available: bool = False
+    decision_evidence_complete: bool = False
+    product_evidence: dict[str, dict[str, object]] = Field(default_factory=dict)
 
     action_query: str | None = None
     procedure_evidence_available: bool = False
@@ -157,6 +161,7 @@ class LLMAgent(
         self._record_tool_results(message, state)
         self._run_bootstrap_retrieval(message, state)
         self._run_intent_router(message, state)
+        self._run_selection_decision_retrieval(message, state)
         self._run_action_retrieval(message, state)
         assistant_message = self._generate_next_message(message, state)
         self._record_tool_call_advisories(assistant_message, state)
@@ -271,6 +276,28 @@ class LLMAgent(
                         runtime.missing_products = re.findall(
                             r"['\"]([^'\"]+)['\"]", missing_match.group(1)
                         )
+                    requested_match = re.search(
+                        r"requested_products['\"]?\s*:\s*\[([^]]*)\]", content
+                    )
+                    covered_match = re.search(
+                        r"covered_products['\"]?\s*:\s*\[([^]]*)\]", content
+                    )
+                    if requested_match:
+                        requested = re.findall(
+                            r"['\"]([^'\"]+)['\"]", requested_match.group(1)
+                        )
+                        covered = (
+                            re.findall(
+                                r"['\"]([^'\"]+)['\"]", covered_match.group(1)
+                            )
+                            if covered_match
+                            else []
+                        )
+                        for product in requested:
+                            runtime.product_evidence[product] = {
+                                "covered": product in covered,
+                                "coverage_complete": runtime.product_coverage_complete,
+                            }
             elif name == "submit_referral":
                 runtime.completed_lookups.add("submit_referral")
                 runtime.pending_action = None
@@ -318,6 +345,62 @@ class LLMAgent(
             logger.warning(f"Bootstrap relevance retrieval failed open: {exc}")
         finally:
             self._bootstrap_retrieval_done = True
+
+    def _run_selection_decision_retrieval(
+        self, message: ValidAgentInputMessage, state: LLMAgentStateType
+    ) -> None:
+        """Fetch evidence needed to compare candidates, without hardcoding a domain.
+
+        Product coverage remains a normal ReAct KB call.  This complementary
+        search asks for the decision fields (benefits, costs, requirements,
+        limits, and exclusions) so a recommendation is not based on names or
+        a single promotional fragment.  It is advisory and fail-open.
+        """
+        if not isinstance(message, UserMessage) or not _is_banking_knowledge_agent(
+            self.tools
+        ):
+            return
+        runtime = state.runtime
+        if runtime.current_intent != "selection":
+            return
+        search_tool = next((tool for tool in self.tools if tool.name == "KB_search"), None)
+        if search_tool is None:
+            return
+        objective = runtime.selection_objective or message.content
+        query = (
+            f"{objective} compare all candidate products benefits costs fees "
+            "requirements eligibility limits exclusions qualifying conditions"
+        ).strip()
+        key = f"selection_decision:{objective.strip()}"
+        if key in runtime.retrieval_keys:
+            return
+        try:
+            evidence = str(search_tool(query=query, coverage="relevance"))
+            runtime.selection_query = query
+            runtime.retrieval_keys.add(key)
+            runtime.decision_evidence_available = bool(evidence.strip()) and (
+                "No relevant documents" not in evidence
+            )
+            # Completeness is intentionally conservative: relevance evidence
+            # alone cannot prove every candidate's fields are covered.
+            runtime.decision_evidence_complete = False
+            state.system_messages.append(
+                SystemMessage(
+                    role="system",
+                    content=(
+                        "<selection_decision_retrieval>\n"
+                        "Evidence for comparing candidates and checking their "
+                        "requirements/limits:\n"
+                        f"{evidence}\n"
+                        "Do not claim all candidates are fully evaluated unless "
+                        "their relevant fields are covered.\n"
+                        "</selection_decision_retrieval>"
+                    ),
+                )
+            )
+            self._inject_runtime_context(state)
+        except Exception as exc:
+            logger.warning(f"Selection decision retrieval failed open: {exc}")
 
     def _run_action_retrieval(
         self, message: ValidAgentInputMessage, state: LLMAgentStateType
@@ -430,7 +513,7 @@ class LLMAgent(
             content=(
                 "Classify the user's latest request into exactly one intent: "
                 "information, selection, or action. Return JSON only with keys "
-                "intent, target, action. Use null when target or action is absent. "
+                "intent, target, action, objective. Use null when a field is absent. "
                 "information asks for facts, explanation, investigation, or status; "
                 "selection compares or chooses products/options; action asks to "
                 "apply, submit, change, update, cancel, approve, or otherwise "
@@ -449,6 +532,7 @@ class LLMAgent(
         state.runtime.current_intent = None
         state.runtime.target = None
         state.runtime.pending_action = None
+        state.runtime.selection_objective = None
         state.system_messages = [
             system_message
             for system_message in state.system_messages
@@ -476,6 +560,8 @@ class LLMAgent(
                 state.runtime.target = str(data["target"])
             if data.get("action"):
                 state.runtime.pending_action = str(data["action"])
+            if data.get("objective"):
+                state.runtime.selection_objective = str(data["objective"])
             state.system_messages.append(
                 SystemMessage(
                     role="system",
@@ -515,11 +601,14 @@ class LLMAgent(
                     "<runtime_state>\n"
                     f"Current intent: {runtime.current_intent or 'unknown'}\n"
                     f"Target: {runtime.target or 'none'}\n"
+                    f"Selection objective: {runtime.selection_objective or 'none'}\n"
                     f"Selected product: {runtime.selected_product or 'none'}\n"
                     f"Pending action: {runtime.pending_action or 'none'}\n"
                     f"Identity verified: {runtime.identity_verified}\n"
                     f"Completed lookups: {completed}\n"
                     f"Product coverage complete: {runtime.product_coverage_complete}\n"
+                    f"Decision evidence available: {runtime.decision_evidence_available}\n"
+                    f"Decision evidence complete: {runtime.decision_evidence_complete}\n"
                     f"Procedure evidence available: {runtime.procedure_evidence_available}\n"
                     f"Eligibility evidence available: {runtime.eligibility_evidence_available}\n"
                     f"Retrieval keys: {retrieval_keys}\n"

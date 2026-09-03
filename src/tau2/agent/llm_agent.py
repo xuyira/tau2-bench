@@ -78,6 +78,8 @@ class AgentRuntimeState(BaseModel):
     identity_verified: bool = False
     completed_lookups: set[str] = Field(default_factory=set)
     retrieval_keys: set[str] = Field(default_factory=set)
+    required_checks: list[str] = Field(default_factory=list)
+    completed_checks: set[str] = Field(default_factory=set)
 
 
 class LLMAgentState(BaseModel):
@@ -164,9 +166,62 @@ class LLMAgent(
         self._run_selection_decision_retrieval(message, state)
         self._run_action_retrieval(message, state)
         assistant_message = self._generate_next_message(message, state)
+        assistant_message = self._retry_if_selection_incomplete(
+            assistant_message, state
+        )
         self._record_tool_call_advisories(assistant_message, state)
         state.messages.append(assistant_message)
         return assistant_message, state
+
+    def _retry_if_selection_incomplete(
+        self, assistant_message: AssistantMessage, state: LLMAgentStateType
+    ) -> AssistantMessage:
+        """Give ReAct one bounded chance to complete selection prerequisites.
+
+        This is intentionally a single retry and only applies when the model
+        produced a final text response without a tool call while required
+        checks remain incomplete.  It is not a hard tool gate: if the retry
+        still declines to call a tool, its response is returned unchanged.
+        """
+        runtime = state.runtime
+        if (
+            runtime.current_intent != "selection"
+            or assistant_message.tool_calls
+            or not runtime.required_checks
+            or len(runtime.completed_checks) >= len(runtime.required_checks)
+        ):
+            return assistant_message
+        missing = [
+            check
+            for check in runtime.required_checks
+            if check not in runtime.completed_checks
+        ]
+        state.system_messages.append(
+            SystemMessage(
+                role="system",
+                content=(
+                    "<selection_completion_notice>\n"
+                    "The previous response attempted to finalize a selection, "
+                    "but these evidence checks are still incomplete:\n- "
+                    + "\n- ".join(missing)
+                    + "\nBefore giving a final recommendation, perform any relevant "
+                    "lookup available in the current tools. This is a soft request; "
+                    "do not invent tools or facts.\n</selection_completion_notice>"
+                ),
+            )
+        )
+        retry = self._generate_next_message(
+            UserMessage(
+                role="user",
+                content="Continue the request and complete any relevant checks before finalizing.",
+            ),
+            state,
+        )
+        # The synthetic continuation must not be retained as user-visible
+        # conversation history; only the resulting assistant message is kept.
+        if state.messages and state.messages[-1] is not retry:
+            state.messages.pop()
+        return retry
 
     @staticmethod
     def _record_tool_call_advisories(
@@ -243,6 +298,11 @@ class LLMAgent(
             if name == "log_verification":
                 runtime.identity_verified = True
                 runtime.completed_lookups.add("identity_verification")
+                runtime.completed_checks.update(
+                    check
+                    for check in runtime.required_checks
+                    if "ident" in check.lower() or "verif" in check.lower()
+                )
             elif name.startswith("get_") or name in {
                 "lookup_user",
                 "lookup_account",
@@ -251,6 +311,12 @@ class LLMAgent(
                 "KB_search_dense",
             }:
                 runtime.completed_lookups.add(name)
+                lookup_text = name.lower().replace("_", " ")
+                runtime.completed_checks.update(
+                    check
+                    for check in runtime.required_checks
+                    if any(token in check.lower() for token in lookup_text.split())
+                )
             if name == "KB_search":
                 query = str(args.get("query", "")).strip()
                 coverage = str(args.get("coverage", "relevance"))
@@ -399,6 +465,7 @@ class LLMAgent(
                 )
             )
             self._inject_runtime_context(state)
+            self._run_obligation_extractor(evidence, state)
         except Exception as exc:
             logger.warning(f"Selection decision retrieval failed open: {exc}")
 
@@ -459,8 +526,73 @@ class LLMAgent(
                 )
             )
             self._inject_runtime_context(state)
+            self._run_obligation_extractor(evidence, state)
         except Exception as exc:
             logger.warning(f"Action retrieval failed open: {exc}")
+
+    def _run_obligation_extractor(
+        self, evidence: str, state: LLMAgentStateType
+    ) -> None:
+        """Turn retrieved prose into a short, semantic checklist.
+
+        The extractor never emits tool names or an execution plan.  Its output
+        is advisory control context so dynamic/discoverable tools remain usable.
+        """
+        if not evidence.strip():
+            return
+        prompt = SystemMessage(
+            role="system",
+            content=(
+                "Extract only explicit obligations from the evidence below. "
+                "Return JSON only: {\"required_checks\":[string],"
+                "\"conditional_checks\":[string]}. Use short semantic phrases "
+                "such as 'verify user identity' or 'check referral history'. "
+                "Do not invent requirements, tool names, or steps not supported "
+                "by the evidence. If none, return empty arrays.\n\n"
+                f"Evidence:\n{evidence[:12000]}"
+            ),
+        )
+        try:
+            result = generate(
+                model=self.llm,
+                # Some OpenAI-compatible endpoints reject a request that has
+                # only a system message. Keep the instruction as system data
+                # and provide the retrieved evidence as an explicit user
+                # message for broad provider compatibility.
+                messages=[
+                    prompt,
+                    UserMessage(
+                        role="user",
+                        content="Classify obligations in this retrieved evidence.",
+                    ),
+                ],
+                tools=None,
+                call_name="evidence_obligations",
+                **self.llm_args,
+            )
+            raw = (result.content or "").strip()
+            match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+            data = json.loads(match.group(0) if match else raw)
+            required = [
+                str(item).strip()
+                for item in data.get("required_checks", [])
+                if str(item).strip()
+            ]
+            conditional = [
+                str(item).strip()
+                for item in data.get("conditional_checks", [])
+                if str(item).strip()
+            ]
+            # Keep the checklist bounded and stable across repeated retrievals.
+            state.runtime.required_checks = list(dict.fromkeys(required + conditional))[:12]
+            state.runtime.completed_checks = {
+                check
+                for check in state.runtime.completed_checks
+                if check in state.runtime.required_checks
+            }
+            self._inject_runtime_context(state)
+        except Exception as exc:
+            logger.warning(f"Evidence obligation extraction failed open: {exc}")
 
     @staticmethod
     def _classify_action_evidence(evidence: str) -> tuple[bool, bool]:
@@ -606,6 +738,8 @@ class LLMAgent(
                     f"Pending action: {runtime.pending_action or 'none'}\n"
                     f"Identity verified: {runtime.identity_verified}\n"
                     f"Completed lookups: {completed}\n"
+                    f"Required checks: {', '.join(runtime.required_checks) or 'none'}\n"
+                    f"Completed checks: {', '.join(sorted(runtime.completed_checks)) or 'none'}\n"
                     f"Product coverage complete: {runtime.product_coverage_complete}\n"
                     f"Decision evidence available: {runtime.decision_evidence_available}\n"
                     f"Decision evidence complete: {runtime.decision_evidence_complete}\n"
